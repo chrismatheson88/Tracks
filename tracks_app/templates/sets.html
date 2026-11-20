@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sets</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <div class="container">
+      <aside class="sidebar">
+        <h1>Sets</h1>
+        <p class="subtitle">Manage your performance set lists</p>
+        <div class="landing-actions" style="justify-content: flex-start; margin-top: 20px;">
+          <a class="landing-button secondary" href="/">Home</a>
+          <a class="landing-button secondary" href="/library">Library</a>
+        </div>
+      </aside>
+
+      <main class="library">
+        {% if setlists %}
+          <section class="setlist-section">
+            {% for setlist in setlists %}
+              <article class="setlist-card">
+                <div class="song-head">
+                  <div>
+                    <h4>{{ setlist.name }}</h4>
+                  </div>
+                  <div class="inline-actions">
+                    <a class="landing-button secondary" href="{{ url_for('set_detail_route', setlist_id=setlist.id) }}">Open set</a>
+                    <form method="post" action="{{ url_for('delete_setlist_route', setlist_id=setlist.id) }}">
+                      <button type="submit" class="danger">Delete</button>
+                    </form>
+                  </div>
+                </div>
+
+                {% if setlist.entries %}
+                  <ol class="setlist-order">
+                    {% for entry in setlist.entries %}
+                      {% if entry.song %}
+                        <li class="setlist-entry" data-song-name="{{ entry.song.title }}" data-bpm="{{ entry.song.tempo }}">
+                          <div>
+                            <strong>{{ entry.song.title }}</strong>
+                            <span>{{ entry.song.tempo }} BPM · {{ entry.song.key }} · {{ entry.song.time_signature }}</span>
+                          </div>
+                          <div class="inline-actions">
+                            <button type="button" class="click-song" data-bpm="{{ entry.song.tempo }}" data-song-name="{{ entry.song.title }}">Play click</button>
+                            <form method="post" action="{{ url_for('remove_song_from_setlist_route', setlist_id=setlist.id, song_id=entry.song.id) }}">
+                              <button type="submit" class="secondary">Remove</button>
+                            </form>
+                          </div>
+                        </li>
+                      {% endif %}
+                    {% endfor %}
+                  </ol>
+                {% else %}
+                  <p class="empty">No songs in this set list yet.</p>
+                {% endif %}
+              </article>
+            {% endfor %}
+          </section>
+        {% else %}
+          <p class="empty">No set lists yet.</p>
+        {% endif %}
+      </main>
+    </div>
+
+    <script>
+      function playClickTrack(bpm, label) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) {
+          alert('This browser does not support Web Audio click playback.');
+          return;
+        }
+
+        const context = new AudioContextClass();
+        const intervalSeconds = 60 / bpm;
+        const totalBeats = 8;
+
+        for (let beat = 0; beat < totalBeats; beat += 1) {
+          const startTime = context.currentTime + beat * intervalSeconds;
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          const accent = beat === 0 ? 1 : 0.5;
+
+          oscillator.type = beat === 0 ? 'triangle' : 'square';
+          oscillator.frequency.setValueAtTime(beat === 0 ? 880 : 660, startTime);
+          gain.gain.setValueAtTime(0.0001, startTime);
+          gain.gain.exponentialRampToValueAtTime(0.25 * accent, startTime + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.12);
+
+          oscillator.connect(gain);
+          gain.connect(context.destination);
+          oscillator.start(startTime);
+          oscillator.stop(startTime + 0.14);
+        }
+
+        setTimeout(() => {
+          if (context.state !== 'closed') {
+            context.close();
+          }
+        }, (totalBeats * intervalSeconds + 0.2) * 1000);
+      }
+
+      document.querySelectorAll('.click-song').forEach((button) => {
+        button.addEventListener('click', () => {
+          playClickTrack(Number(button.dataset.bpm), button.dataset.songName);
+        });
+      });
+    </script>
+  </body>
+</html>

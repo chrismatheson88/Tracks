@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  </head>
+  <body>
+    <div class="home-shell">
+      <main class="home-card" style="text-align: left;">
+        <h1 style="text-align: center;">Settings</h1>
+        <div class="landing-actions" style="margin-bottom: 24px;">
+          <a class="landing-button secondary" href="/">Home</a>
+          <a class="landing-button secondary" href="/library">Library</a>
+          <a class="landing-button secondary" href="/sets">Sets</a>
+        </div>
+
+        <div class="song-form">
+          <label>
+            Default count-in voice
+            <select id="voice-select" class="voice-select" aria-label="Select default English count-in voice">
+              <option value="default">Default</option>
+            </select>
+          </label>
+          <p id="voice-status" class="empty" role="status"></p>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      const voiceSelect = document.getElementById('voice-select');
+      const voiceStatus = document.getElementById('voice-status');
+      const voiceStorageKey = 'tracks.defaultEnglishVoice';
+
+      function populateVoiceList() {
+        if (!('speechSynthesis' in window) || !voiceSelect) return;
+
+        const englishVoices = window.speechSynthesis.getVoices().filter((voice) =>
+          String(voice.lang || '').toLowerCase().startsWith('en-')
+        );
+        const savedVoiceName = localStorage.getItem(voiceStorageKey);
+        const options = [{ value: 'default', label: 'Default' }];
+
+        englishVoices.forEach((voice) => {
+          options.push({ value: voice.name, label: `${voice.name} (${voice.lang})` });
+        });
+
+        voiceSelect.innerHTML = options.map((option) =>
+          `<option value="${option.value}">${option.label}</option>`
+        ).join('');
+
+        if (savedVoiceName && englishVoices.some((voice) => voice.name === savedVoiceName)) {
+          voiceSelect.value = savedVoiceName;
+          voiceStatus.textContent = `Saved default: ${savedVoiceName}`;
+        } else {
+          voiceSelect.value = 'default';
+          voiceStatus.textContent = 'Using the browser default English voice';
+        }
+      }
+
+      if ('speechSynthesis' in window) {
+        populateVoiceList();
+        window.speechSynthesis.onvoiceschanged = populateVoiceList;
+      } else {
+        voiceStatus.textContent = 'Speech synthesis is not available in this browser';
+        voiceSelect.disabled = true;
+      }
+
+      voiceSelect.addEventListener('change', () => {
+        if (voiceSelect.value === 'default') {
+          localStorage.removeItem(voiceStorageKey);
+          voiceStatus.textContent = 'Using the browser default English voice';
+        } else {
+          localStorage.setItem(voiceStorageKey, voiceSelect.value);
+          voiceStatus.textContent = `Saved default: ${voiceSelect.value}`;
+        }
+      });
+    </script>
+  </body>
+</html>
