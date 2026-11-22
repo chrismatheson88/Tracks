@@ -57,50 +57,70 @@ def load_wav(file_path: str | Path) -> np.ndarray:
 
 
 def inspect_wav_directory(directory: str | Path) -> tuple[List[SongTrack], list[str], str | None]:
-    """Inspect direct WAV files in a directory and build one track per file."""
+    """Inspect direct WAV/MP3 files in a directory and build one track per file."""
     if sf is None:
-        return [], [], "soundfile is required to inspect WAV files."
+        return [], [], "soundfile is required to inspect audio files."
 
     directory_path = Path(directory)
     if not directory_path.exists() or not directory_path.is_dir():
         return [], [], "Select a valid directory."
 
-    wav_paths = sorted(
-        (path for path in directory_path.iterdir() if path.is_file() and path.suffix.lower() == ".wav"),
+    audio_paths = sorted(
+        (path for path in directory_path.iterdir() if path.is_file() and path.suffix.lower() in {".wav", ".mp3"}),
         key=lambda path: path.name.lower(),
     )
-    if not wav_paths:
-        return [], [], "No WAV files were found in the selected directory."
+    if not audio_paths:
+        return [], [], "No WAV or MP3 files were found in the selected directory."
 
     tracks: List[SongTrack] = []
     length_details: list[tuple[str, int, int]] = []
     mismatches: list[str] = []
 
-    for index, wav_path in enumerate(wav_paths):
+    for index, audio_path in enumerate(audio_paths):
         try:
-            info = sf.info(str(wav_path))
-            length_details.append((wav_path.name, int(info.frames), int(info.samplerate)))
+            info = sf.info(str(audio_path))
+            length_details.append((audio_path.name, int(info.frames), int(info.samplerate)))
             tracks.append(SongTrack(
-                name=wav_path.stem,
-                file_path=str(wav_path.resolve()),
+                name=audio_path.stem,
+                file_path=str(audio_path.resolve()),
                 output_channel=index,
                 gain=1.0,
             ))
         except Exception as exc:
-            mismatches.append(f"{wav_path.name}: could not read WAV ({exc})")
+            mismatches.append(f"{audio_path.name}: could not read audio file ({exc})")
 
     if not tracks:
-        return [], mismatches, "No readable WAV files were found in the selected directory."
+        return [], mismatches, "No readable WAV or MP3 files were found in the selected directory."
 
     durations = {round(frames / max(1, samplerate), 6) for _, frames, samplerate in length_details}
     if len(durations) > 1:
-        length_summary = ", ".join(
-            f"{name}: {frames / max(1, samplerate):.3f}s"
-            for name, frames, samplerate in length_details
-        )
-        mismatches.insert(0, f"WAV lengths differ — {length_summary}")
+        length_summary = ", ".join(f"{name}: {frames / max(1, samplerate):.3f}s" for name, frames, samplerate in length_details)
+        mismatches.insert(0, f"Audio lengths differ — {length_summary}")
 
     return tracks, mismatches, None
+
+
+def inspect_audio_channels(directory: str | Path) -> list[str]:
+    """Return per-file mono/stereo/multi-channel status for WAV/MP3 files."""
+    if sf is None:
+        return []
+
+    directory_path = Path(directory)
+    if not directory_path.exists() or not directory_path.is_dir():
+        return []
+
+    details: list[str] = []
+    for audio_path in sorted(directory_path.iterdir(), key=lambda path: path.name.lower()):
+        if not audio_path.is_file() or audio_path.suffix.lower() not in {".wav", ".mp3"}:
+            continue
+        try:
+            info = sf.info(str(audio_path))
+            channels = int(info.channels)
+            channel_kind = "mono" if channels == 1 else "stereo" if channels == 2 else f"{channels}-channel"
+            details.append(f"{audio_path.name}: {channel_kind}")
+        except Exception as exc:
+            details.append(f"{audio_path.name}: could not assert channels ({exc})")
+    return details
 
 
 class PlaybackEngine:
@@ -485,9 +505,3 @@ class PlaybackEngine:
         source_positions = np.linspace(0, len(data) - 1, num=len(data), dtype=np.float64)
         target_positions = np.linspace(0, len(data) - 1, num=target_length, dtype=np.float64)
         return np.interp(target_positions, source_positions, data).astype(np.float32)
-
-    def __del__(self):
-        try:
-            self.stop()
-        except Exception:
-            pass

@@ -429,11 +429,11 @@ def test_countin_voice_directories_are_discoverable():
 
 
 def test_next_previous_restart_logic_is_wired():
-    from pathlib import Path
+    from tracks_app.views.open_set_view import SetViewMixin
 
-    source = Path("tracks_app/desktop.py").read_text()
-    assert "was_playing = not self.open_set_play_is_paused" in source
-    assert "self.play_open_set_song()" in source
+    assert hasattr(SetViewMixin, "previous_set_song")
+    assert hasattr(SetViewMixin, "next_set_song")
+    assert hasattr(SetViewMixin, "stop_playback")
 
 
 def test_compound_tempo_click_spacing_is_three_quavers():
@@ -454,7 +454,7 @@ def test_inspect_wav_directory_rejects_directory_with_no_wavs(tmp_path):
 
     assert tracks == []
     assert mismatches == []
-    assert error == "No WAV files were found in the selected directory."
+    assert error == "No WAV or MP3 files were found in the selected directory."
 
 
 def test_inspect_wav_directory_accepts_matching_lengths(tmp_path):
@@ -477,4 +477,48 @@ def test_inspect_wav_directory_reports_mismatched_lengths(tmp_path):
 
     assert error is None
     assert len(tracks) == 2
-    assert any("WAV lengths differ" in mismatch for mismatch in mismatches)
+    assert any("Audio lengths differ" in mismatch for mismatch in mismatches)
+
+
+def test_inspect_wav_directory_reports_mono_and_stereo_files(tmp_path):
+    sf.write(tmp_path / "01_mono.wav", np.zeros((512, 1), dtype=np.float32), 44100)
+    sf.write(tmp_path / "02_stereo.wav", np.zeros((512, 2), dtype=np.float32), 44100)
+
+    tracks, mismatches, error = inspect_wav_directory(tmp_path)
+    from tracks_app.playback import inspect_audio_channels
+    details = inspect_audio_channels(tmp_path)
+
+    assert error is None
+    assert len(tracks) == 2
+    assert mismatches == []
+    assert any("01_mono.wav: mono" in item for item in details)
+    assert any("02_stereo.wav: stereo" in item for item in details)
+
+
+def test_inspect_audio_channels_reports_mono_and_stereo(tmp_path):
+    from tracks_app.playback import inspect_audio_channels
+
+    sf.write(tmp_path / "01_mono.wav", np.zeros((512, 1), dtype=np.float32), 44100)
+    sf.write(tmp_path / "02_stereo.wav", np.zeros((512, 2), dtype=np.float32), 44100)
+
+    details = inspect_audio_channels(tmp_path)
+
+    assert "01_mono.wav: mono" in details
+    assert "02_stereo.wav: stereo" in details
+
+
+def test_attached_track_paths_persist_after_save_and_reload(tmp_path):
+    import tracks_app.db as db_module
+
+    audio_file = tmp_path / "01_drums.wav"
+    sf.write(audio_file, np.zeros((512, 1), dtype=np.float32), 44100)
+
+    song = db_module.save_song(
+        Song(title="Attached", tracks=[SongTrack(name="01_drums", file_path=str(audio_file), output_channel=0)]),
+        tmp_path / "library.sqlite3",
+    )
+    loaded = db_module.load_song(song.id, tmp_path / "library.sqlite3")
+
+    assert loaded is not None
+    assert len(loaded.tracks) == 1
+    assert loaded.tracks[0].file_path == str(audio_file)

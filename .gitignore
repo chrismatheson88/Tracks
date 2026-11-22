@@ -31,3 +31,4 @@ ENV/
 *.db
 
 # Local uploaded and generated audio/assets
+uploaded_tracks/
