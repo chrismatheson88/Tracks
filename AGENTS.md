@@ -2,7 +2,11 @@
 
 ## Project overview
 
-Tracks is a PySide6 desktop application for managing a music library, set lists, per-set song overrides, playback, metronome/count-in audio, and multi-output routing.
+Tracks is a music library, set list manager, multi-channel backing track player, and metronome/count-in audio application with multi-output routing.
+
+It features two implementations:
+1. **Python / PySide6 Reference Implementation** (`tracks_app/`) — desktop and web application.
+2. **C++ / JUCE Native Implementation** (`juce_app/`) — high-performance, real-time desktop application (`Tracks.app`) built with CMake and JUCE 8.
 
 Primary entry points:
 
@@ -11,6 +15,39 @@ Primary entry points:
 - `tracks_app/playback.py` — audio loading, mixing, metronome, count-in, and output callback behavior.
 - `tracks_app/db.py` — SQLite schema, migrations, and persistence.
 - `tracks_app/models.py` — `Song`, `SongTrack`, `Setlist`, and `SetlistEntry` data models.
+- `juce_app/Source/Main.cpp` — JUCE application entry point.
+- `juce_app/Source/Audio/AudioEngine.cpp` — real-time JUCE audio engine with multi-channel stereo routing and post-mix peak metering.
+
+## JUCE C++ Application (`juce_app/`)
+
+The native C++ port lives in `juce_app/`:
+
+- `Source/Models/` — C++ domain structs: `Song`, `SongTrack`, `Setlist`, `SetlistEntry`.
+- `Source/Database/` — `DatabaseService` using native SQLite3 with `PRAGMA foreign_keys = ON;`, transactions, migrations, and cascade deletes.
+- `Source/Audio/` — `AudioEngine` (device management, multi-channel playback, stereo routing `[ch, ch+1]`, mono downmix fallback, master volume, soft limiter, atomic peak meter) and `Metronome` (compound 6/8 and 12/8 time, accent pulses, speech count-in).
+- `Source/Services/` — `AudioAttachmentService` for WAV/MP3 inspection, channel reporting, and storage in `uploaded_tracks/<song-id>/tracks/`.
+- `Source/Common/AppTheme.h` — dark theme LookAndFeel matching Tracks design.
+- `Source/UI/Widgets/` — `BeatPlayheadComponent`, `OutputMeterComponent`, `TransportComponent`.
+- `Source/UI/Views/` — `LibraryView`, `OpenSetView`, `SettingsView`.
+- `Source/Tests/` — `DatabaseTests.cpp` and `AudioEngineTests.cpp`.
+
+### Building and Testing the JUCE App
+
+```bash
+# Configure with CMake
+.venv/bin/cmake -B juce_app/build -S juce_app
+
+# Build Tracks application
+.venv/bin/cmake --build juce_app/build --target Tracks -j 8
+
+# Run C++ tests
+.venv/bin/cmake --build juce_app/build --target DatabaseTests AudioEngineTests -j 8
+juce_app/build/DatabaseTests
+juce_app/build/AudioEngineTests
+
+# Launch the compiled macOS app
+open juce_app/build/Tracks_artefacts/Tracks.app
+```
 
 ## UI structure
 

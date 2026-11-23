@@ -32,3 +32,13 @@ ENV/
 
 # Local uploaded and generated audio/assets
 uploaded_tracks/
+
+# C++ / CMake
+build/
+juce_app/build/
+juce_app/ThirdParty/JUCE/
+.cache/
+*.o
+*.dylib
+*.a
+
