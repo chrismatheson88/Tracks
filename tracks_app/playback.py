@@ -76,16 +76,19 @@ def inspect_wav_directory(directory: str | Path) -> tuple[List[SongTrack], list[
     length_details: list[tuple[str, int, int]] = []
     mismatches: list[str] = []
 
+    current_channel = 0
     for index, audio_path in enumerate(audio_paths):
         try:
             info = sf.info(str(audio_path))
+            channels = int(info.channels)
             length_details.append((audio_path.name, int(info.frames), int(info.samplerate)))
             tracks.append(SongTrack(
                 name=audio_path.stem,
                 file_path=str(audio_path.resolve()),
-                output_channel=index,
+                output_channel=current_channel,
                 gain=1.0,
             ))
+            current_channel += 2 if channels >= 2 else 1
         except Exception as exc:
             mismatches.append(f"{audio_path.name}: could not read audio file ({exc})")
 
@@ -259,17 +262,20 @@ class PlaybackEngine:
             if window.shape[0] == 0:
                 continue
 
-            # Strict isolation: each backing track writes to one destination
-            # channel only (its configured output channel). For multi-channel
-            # source files we take the first channel to avoid cross-content
-            # from source-channel summing.
-            if data.shape[1] == 1:
-                channel_values = window[:, 0]
+            gain = TrackState.track.gain
+            if data.shape[1] >= 2:
+                # Stereo track: route across [channel_a, channel_a + 1] if available,
+                # otherwise downmix to mono on channel_a so right-channel audio is not lost.
+                if channel_a + 1 < self.output_channels:
+                    output[: len(window), channel_a] += window[:, 0] * gain
+                    output[: len(window), channel_a + 1] += window[:, 1] * gain
+                elif channel_a < self.output_channels:
+                    downmixed = np.mean(window[:, :2], axis=1) * gain
+                    output[: len(window), channel_a] += downmixed
             else:
-                channel_values = window[:, 0]
-
-            if channel_a < self.output_channels:
-                output[: len(channel_values), channel_a] += channel_values * TrackState.track.gain
+                # Mono track: route directly to channel_a
+                if channel_a < self.output_channels:
+                    output[: len(window), channel_a] += window[:, 0] * gain
 
             TrackState.position = (TrackState.position + frames) % audio_length
 

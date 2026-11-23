@@ -28,7 +28,7 @@ def copy_tracks_to_song_directory(project_root: Path, song_id: int, tracks: list
         copied_tracks.append(SongTrack(
             name=source.stem,
             file_path=str(target.resolve()),
-            output_channel=index,
+            output_channel=track.output_channel,
             gain=track.gain,
             muted=track.muted,
         ))

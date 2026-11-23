@@ -555,3 +555,53 @@ def test_playback_engine_missing_file_skips_gracefully():
     engine = PlaybackEngine(song, output_channels=2)
     assert len(engine.tracks) == 0
 
+
+def test_render_chunk_routes_stereo_to_dual_channels_when_available(tmp_path):
+    track_stereo = tmp_path / "stereo.wav"
+    data = np.zeros((512, 2), dtype=np.float32)
+    data[:, 0] = 0.35  # Left channel
+    data[:, 1] = 0.75  # Right channel
+    sf.write(track_stereo, data, 44100)
+
+    song = Song(title="Stereo Demo", tracks=[SongTrack(name="Synth", file_path=str(track_stereo), output_channel=0)])
+    engine = PlaybackEngine(song, output_channels=4)
+    rendered = engine.render_chunk(512)
+
+    assert rendered.shape == (512, 4)
+    # Channel 0 has Left channel
+    assert np.allclose(rendered[:, 0], 0.35, atol=1e-4)
+    # Channel 1 has Right channel
+    assert np.allclose(rendered[:, 1], 0.75, atol=1e-4)
+    # Other channels remain zero
+    assert np.all(rendered[:, 2:] == 0)
+
+
+def test_render_chunk_downmixes_stereo_when_adjacent_channel_unavailable(tmp_path):
+    track_stereo = tmp_path / "stereo.wav"
+    data = np.zeros((512, 2), dtype=np.float32)
+    data[:, 0] = 0.2
+    data[:, 1] = 0.8
+    sf.write(track_stereo, data, 44100)
+
+    song = Song(title="Stereo Downmix", tracks=[SongTrack(name="Synth", file_path=str(track_stereo), output_channel=0)])
+    engine = PlaybackEngine(song, output_channels=1)
+    rendered = engine.render_chunk(512)
+
+    assert rendered.shape == (512, 1)
+    # Downmixed average (0.2 + 0.8) / 2 = 0.5
+    assert np.allclose(rendered[:, 0], 0.5, atol=1e-4)
+
+
+def test_inspect_wav_directory_assigns_stereo_channel_offset(tmp_path):
+    sf.write(tmp_path / "01_stereo.wav", np.zeros((512, 2), dtype=np.float32), 44100)
+    sf.write(tmp_path / "02_mono.wav", np.zeros((512, 1), dtype=np.float32), 44100)
+
+    tracks, mismatches, error = inspect_wav_directory(tmp_path)
+
+    assert error is None
+    assert len(tracks) == 2
+    # Stereo track 1 gets channel 0 (occupies 0 and 1)
+    assert tracks[0].output_channel == 0
+    # Mono track 2 gets channel 2
+    assert tracks[1].output_channel == 2
+

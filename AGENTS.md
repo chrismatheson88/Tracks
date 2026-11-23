@@ -99,7 +99,7 @@ For Edit Song:
 
 ## Audio playback
 
-- Backing tracks route to their configured output channels.
+- Backing tracks route to their configured output channels; stereo tracks route to [channel, channel + 1] when available, or downmix to mono if the second channel is unavailable.
 - Metronome and count-in have separate Click and Guide channels.
 - Master gain applies after tracks/metronome mixing.
 - Callback buffers must be zero-filled before writing to prevent stale-channel or bleed artifacts.
