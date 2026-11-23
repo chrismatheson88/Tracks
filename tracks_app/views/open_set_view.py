@@ -30,9 +30,10 @@ from ..db import (
     list_setlists,
     load_setlist,
     save_setlist,
+    save_song,
     set_app_setting,
 )
-from ..models import Setlist, SetlistEntry
+from ..models import Setlist, SetlistEntry, Song
 from ..playback import PlaybackEngine, list_audio_devices
 from ..services.set_logic import entry_to_summary, reorder_set_entries, song_with_entry_overrides
 from ..widgets.beat_playhead import BeatPlayheadWidget
@@ -109,14 +110,14 @@ class SetViewMixin:
         except Exception:
             output_channels = 2
 
-        self.player = PlaybackEngine(self.current_song, output_channels=output_channels, device_index=selected_device)
-        self.player.click_gain = self.db_to_linear(self.click_fader.value())
-        self.player.guide_gain = self.db_to_linear(self.guide_fader.value())
-        self.player.master_gain = self.db_to_linear(self.master_fader.value())
         try:
+            self.player = PlaybackEngine(self.current_song, output_channels=output_channels, device_index=selected_device)
+            self.player.click_gain = self.db_to_linear(self.click_fader.value())
+            self.player.guide_gain = self.db_to_linear(self.guide_fader.value())
+            self.player.master_gain = self.db_to_linear(self.master_fader.value())
             self.player.start()
             self.set_play_pause_state(False)
-        except RuntimeError as exc:
+        except Exception as exc:
             self.player = None
             QMessageBox.critical(self, "Playback error", str(exc))
 
@@ -293,7 +294,7 @@ class SetViewMixin:
         self.reset_set_song_button.setEnabled(enabled)
         self.save_set_song_to_library_button.setEnabled(enabled)
 
-    def song_with_entry_overrides(self, entry: SetlistEntry) -> None:
+    def song_with_entry_overrides(self, entry: SetlistEntry) -> Song:
         return song_with_entry_overrides(entry)
 
     def entry_to_summary(self, entry: SetlistEntry) -> str:
@@ -383,7 +384,10 @@ class SetViewMixin:
         library_song.tempo = int(self.set_song_tempo.value())
         library_song.key = self.set_song_key.text().strip() or "C"
         library_song.time_signature = self.set_song_time_signature.currentText().strip() or "4/4"
+        save_song(library_song)
         save_setlist(self.current_set)
+        if hasattr(self, "refresh_library"):
+            self.refresh_library()
 
     def set_live_click_db(self, db: int) -> None:
         if self.player:

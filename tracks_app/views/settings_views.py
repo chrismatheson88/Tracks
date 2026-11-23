@@ -30,26 +30,8 @@ def build_settings_view(window) -> QWidget:
 
     form = QFormLayout()
 
-    click_dir = Path(__file__).resolve().parent.parent / "assets" / "clicks"
-    families = sorted({
-        path.stem.split("_", 1)[0]
-        for path in click_dir.glob("*.wav")
-        if "_" in path.stem
-    })
-
-    accent_saved = get_app_setting("click.accent_wav", "")
-    saved_family = Path(accent_saved).stem.split("_", 1)[0] if accent_saved else ""
     window.click_family = QComboBox()
-
-    for family in families:
-        accent_path = click_dir / f"{family}_accent.wav"
-        normal_path = click_dir / f"{family}_normal.wav"
-        if accent_path.exists() and normal_path.exists():
-            window.click_family.addItem(family, (str(accent_path), str(normal_path)))
-
-    saved_index = window.click_family.findText(saved_family)
-    if saved_index >= 0:
-        window.click_family.setCurrentIndex(saved_index)
+    window.refresh_click_families()
 
     click_row = QHBoxLayout()
     click_row.addWidget(window.click_family)
@@ -58,15 +40,8 @@ def build_settings_view(window) -> QWidget:
     click_row.addWidget(import_button)
     form.addRow("Click sound:", click_row)
 
-    countin_dir = Path(__file__).resolve().parent.parent / "assets" / "countin"
-    voice_names = sorted(path.name for path in countin_dir.iterdir() if path.is_dir())
-    saved_voice = get_app_setting("countin.voice", "female")
     window.voice_family = QComboBox()
-    for voice_name in voice_names:
-        window.voice_family.addItem(voice_name)
-    voice_index = window.voice_family.findText(saved_voice)
-    if voice_index >= 0:
-        window.voice_family.setCurrentIndex(voice_index)
+    window.refresh_voice_families()
 
     voice_row = QHBoxLayout()
     voice_row.addWidget(window.voice_family)
@@ -221,6 +196,44 @@ class SettingsViewMixin:
         self.output_device.setCurrentIndex(selected_output_index if selected_output_index >= 0 else 0)
         self.output_device.blockSignals(False)
 
+    def refresh_click_families(self) -> None:
+        if not hasattr(self, "click_family"):
+            return
+        click_dir = Path(__file__).resolve().parent.parent / "assets" / "clicks"
+        families = sorted({
+            path.stem.split("_", 1)[0]
+            for path in click_dir.glob("*.wav")
+            if "_" in path.stem
+        })
+        accent_saved = get_app_setting("click.accent_wav", "")
+        saved_family = Path(accent_saved).stem.split("_", 1)[0] if accent_saved else ""
+        self.click_family.blockSignals(True)
+        self.click_family.clear()
+        for family in families:
+            accent_path = click_dir / f"{family}_accent.wav"
+            normal_path = click_dir / f"{family}_normal.wav"
+            if accent_path.exists() and normal_path.exists():
+                self.click_family.addItem(family, (str(accent_path), str(normal_path)))
+        saved_index = self.click_family.findText(saved_family)
+        if saved_index >= 0:
+            self.click_family.setCurrentIndex(saved_index)
+        self.click_family.blockSignals(False)
+
+    def refresh_voice_families(self) -> None:
+        if not hasattr(self, "voice_family"):
+            return
+        countin_dir = Path(__file__).resolve().parent.parent / "assets" / "countin"
+        voice_names = sorted(path.name for path in countin_dir.iterdir() if path.is_dir())
+        saved_voice = get_app_setting("countin.voice", "female")
+        self.voice_family.blockSignals(True)
+        self.voice_family.clear()
+        for voice_name in voice_names:
+            self.voice_family.addItem(voice_name)
+        voice_index = self.voice_family.findText(saved_voice)
+        if voice_index >= 0:
+            self.voice_family.setCurrentIndex(voice_index)
+        self.voice_family.blockSignals(False)
+
     def save_output_device(self, index: int) -> None:
         if index >= 0:
             set_app_setting("audio.output_device", str(self.output_device.itemData(index)))
@@ -266,6 +279,7 @@ class SettingsViewMixin:
         self.import_name.clear()
         self.import_accent_path.clear()
         self.import_normal_path.clear()
+        self.refresh_click_families()
         QMessageBox.information(self, "Click sound imported", f"Imported '{name}' into the click sound list.")
         self.views.setCurrentIndex(3)
 
@@ -295,5 +309,6 @@ class SettingsViewMixin:
 
         self.import_voice_name.clear()
         self.import_voice_dir.clear()
+        self.refresh_voice_families()
         QMessageBox.information(self, "Voice imported", f"Imported '{name}' count-in voice.")
         self.views.setCurrentIndex(3)

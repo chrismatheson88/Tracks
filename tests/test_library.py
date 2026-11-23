@@ -401,6 +401,12 @@ def test_volume_fader_db_conversion():
     assert TracksDesktopWindow.db_to_linear(-30) == 0.0
     assert abs(TracksDesktopWindow.db_to_linear(12) - 3.9810717055349722) < 1e-12
 
+    class DummyWindow:
+        db_to_linear = TracksDesktopWindow.db_to_linear
+
+    assert DummyWindow().db_to_linear(0) == 1.0
+    assert DummyWindow().db_to_linear(-30) == 0.0
+
 
 def test_playback_engine_gain_fields_mutate_live():
     from tracks_app.models import Song
@@ -522,3 +528,30 @@ def test_attached_track_paths_persist_after_save_and_reload(tmp_path):
     assert loaded is not None
     assert len(loaded.tracks) == 1
     assert loaded.tracks[0].file_path == str(audio_file)
+
+
+def test_compound_12_8_metronome_render_does_not_crash():
+    song = Song(title="Compound 12/8", tempo=120, time_signature="12/8")
+    engine = PlaybackEngine(song, output_channels=2)
+    rendered = engine.render_metronome(44100 * 2)
+    assert rendered.shape == (44100 * 2, 2)
+
+
+def test_foreign_keys_cascade_delete_song_and_tracks(tmp_path):
+    from tracks_app.db import _connect, delete_song, save_song
+
+    db_path = tmp_path / "fk_test.sqlite3"
+    song = save_song(Song(title="Cascade Song", tracks=[SongTrack(name="T1", file_path="t1.wav")]), db_path)
+    assert song.id is not None
+    with _connect(db_path) as conn:
+        assert len(conn.execute("SELECT * FROM tracks WHERE song_id = ?", (song.id,)).fetchall()) == 1
+    delete_song(song.id, db_path)
+    with _connect(db_path) as conn:
+        assert len(conn.execute("SELECT * FROM tracks WHERE song_id = ?", (song.id,)).fetchall()) == 0
+
+
+def test_playback_engine_missing_file_skips_gracefully():
+    song = Song(title="Missing File", tracks=[SongTrack(name="Ghost", file_path="/nonexistent/ghost.wav")])
+    engine = PlaybackEngine(song, output_channels=2)
+    assert len(engine.tracks) == 0
+

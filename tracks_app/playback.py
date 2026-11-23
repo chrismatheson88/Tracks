@@ -224,7 +224,10 @@ class PlaybackEngine:
         for track in self.song.tracks:
             if track.muted or not track.file_path:
                 continue
-            data = load_wav(track.file_path)
+            try:
+                data = load_wav(track.file_path)
+            except Exception:
+                continue
             if data.ndim == 1:
                 data = data.reshape(-1, 1)
             loaded_track = LoadedTrack(track=track, data=data.astype(np.float32, copy=False))
@@ -317,7 +320,8 @@ class PlaybackEngine:
                     word = speech_pattern[beat_index]
                 else:
                     words = ("one", "two", "three", "four", "five", "six", "seven", "eight")
-                    word = words[beat_index % pulse_count_per_bar]
+                    beat_in_bar = beat_index % pulse_count_per_bar
+                    word = words[beat_in_bar] if beat_in_bar < len(words) else None
 
                 if word:
                     word_data = self._countin_words.get(word)

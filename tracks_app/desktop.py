@@ -60,6 +60,7 @@ from .views.settings_views import SettingsViewMixin, build_settings_view, build_
 from .services.audio_controls import db_to_linear, effective_set_entry_values
 from .services.set_logic import (
     entry_to_summary,
+    format_set_date_for_display,
     reorder_set_entries,
     set_picker_list_label,
     setlists_sorted_by_datetime_desc,
@@ -210,6 +211,8 @@ class TracksDesktopWindow(LibraryViewMixin, SetViewMixin, SettingsViewMixin, QMa
 
     def show_settings_view(self) -> None:
         self.refresh_output_device_list()
+        self.refresh_click_families()
+        self.refresh_voice_families()
         self.views.setCurrentIndex(3)
 
     def refresh_open_set_picker(self) -> None:
@@ -275,18 +278,7 @@ class TracksDesktopWindow(LibraryViewMixin, SetViewMixin, SettingsViewMixin, QMa
 
     @staticmethod
     def format_set_date_for_display(set_date: str) -> str:
-        if not set_date:
-            return ""
-
-        date = QDate.fromString(set_date, "dd-MM-yyyy")
-        if date.isValid():
-            return date.toString("dd-MM-yyyy")
-
-        legacy_date = QDate.fromString(set_date, "yyyy-MM-dd")
-        if legacy_date.isValid():
-            return legacy_date.toString("dd-MM-yyyy")
-
-        return set_date
+        return format_set_date_for_display(set_date)
 
     def open_set(self, set_id: int) -> None:
         setlist = load_setlist(set_id)
@@ -452,6 +444,7 @@ class TracksDesktopWindow(LibraryViewMixin, SetViewMixin, SettingsViewMixin, QMa
             delete_setlist(set_id)
             self.refresh_sets()
 
+    @staticmethod
     def db_to_linear(db: int) -> float:
         return db_to_linear(db)
 

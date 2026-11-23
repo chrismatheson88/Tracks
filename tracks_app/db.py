@@ -12,6 +12,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "tracks_library.sqlit
 def _connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     connection = sqlite3.connect(str(db_path))
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
     return connection
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -232,7 +233,12 @@ class LibraryViewMixin:
             return
         answer = QMessageBox.question(self, "Delete song", f"Delete '{self.current_song.title}' from the library?")
         if answer == QMessageBox.Yes:
-            delete_song(self.current_song.id)
+            song_id = self.current_song.id
+            delete_song(song_id)
+            if song_id is not None:
+                song_storage = Path(__file__).resolve().parent.parent / "uploaded_tracks" / str(song_id)
+                if song_storage.exists():
+                    shutil.rmtree(song_storage, ignore_errors=True)
             self.current_song = None
             self.library_details.clear()
             self.refresh_library()

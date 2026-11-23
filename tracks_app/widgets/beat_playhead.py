@@ -55,7 +55,7 @@ class BeatPlayheadWidget(QWidget):
         elapsed_frames = max(0, int(player._metronome_frame)) if player is not None else 0
         loop_frames = max(beat_frames, int(getattr(player, "loop_frames", beat_frames))) if player is not None else beat_frames
 
-        countin_ratio = min(0.38, countin_frames / max(1, countin_frames + loop_frames))
+        countin_ratio = 0.40
         countin_width = int(width * countin_ratio)
         loop_x = countin_width
         loop_width = width - loop_x

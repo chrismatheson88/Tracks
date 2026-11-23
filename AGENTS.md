@@ -189,6 +189,7 @@ PY
 - Existing SQLite row IDs are important: `Song.id` and `Setlist.id` identify persisted records.
 - `SongTrack.output_channel` is zero-based for routing, while UI channel selectors normally display it as one-based.
 - `save_song` recreates/updates track rows from `song.tracks`; do not assume omitted tracks remain untouched.
+- SQLite connections must enable `PRAGMA foreign_keys = ON;` so cascading deletes (`ON DELETE CASCADE`) are enforced.
 - Set-entry overrides are persisted separately from library-song fields.
 - User audio paths must be app-local after save: store paths inside `tracks_app/uploaded_tracks/<song-id>/tracks/` rather than temporary source-directory paths.
 - Song deletion should remove or orphan-clean uploaded-track storage for that song ID.
@@ -276,7 +277,7 @@ Extract further into:
 - `tracks_app/views/library_view.py` — Library and Edit Song UI/handlers.
 - `tracks_app/views/open_set_view.py` — Open Set UI, set controls, transport, and set overrides.
 - `tracks_app/views/settings_views.py` — Settings, device, click, and voice import UI.
-- `tracks_app/services/set_service.py` — Set CRUD and override persistence.
+- `tracks_app/services/set_logic.py` — Set CRUD, sorting, and override persistence.
 - `tracks_app/services/audio_attachment_service.py` — WAV/MP3 validation/copy/clear behavior.
 - `tracks_app/widgets/` — reusable visual widgets and controls.
 
