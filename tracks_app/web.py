@@ -18,9 +18,15 @@ from .db import (
     save_song,
 )
 from .models import Setlist, SetlistEntry, Song, SongTrack
+from .services.audio_attachment_service import (
+    CANONICAL_UPLOAD_DIR,
+    PACKAGE_ROOT,
+    get_song_tracks_dir,
+    remove_song_storage,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-UPLOAD_DIR = PROJECT_ROOT / "uploaded_tracks"
+UPLOAD_DIR = CANONICAL_UPLOAD_DIR
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 app = Flask(__name__)
@@ -89,23 +95,24 @@ def create_song():
 
     uploaded = request.files.getlist("tracks")
     if uploaded:
-        song_dir = UPLOAD_DIR / str(song.id)
-        song_dir.mkdir(exist_ok=True, parents=True)
-        for index, upload in enumerate(uploaded):
+        song_tracks_dir = get_song_tracks_dir(song.id)
+        song_tracks_dir.mkdir(exist_ok=True, parents=True)
+        current_channel = 0
+        for upload in uploaded:
             if not upload or upload.filename == "":
                 continue
             safe_name = secure_filename(upload.filename)
-            save_path = song_dir / safe_name
+            save_path = song_tracks_dir / safe_name
             upload.save(save_path)
-            relative_path = f"uploaded_tracks/{song.id}/{safe_name}"
             song.add_track(
                 SongTrack(
                     name=Path(safe_name).stem,
-                    file_path=relative_path,
-                    output_channel=index,
+                    file_path=str(save_path.resolve()),
+                    output_channel=current_channel,
                     gain=1.0,
                 )
             )
+            current_channel += 1
         save_song(song, DEFAULT_DB_PATH)
 
     flash("Song added to the library.", "success")
@@ -157,6 +164,7 @@ def update_song_route(song_id: int):
 @app.post("/songs/<int:song_id>/delete")
 def delete_song_route(song_id: int):
     delete_song(song_id, DEFAULT_DB_PATH)
+    remove_song_storage(song_id)
     flash("Song removed.", "success")
     return redirect(url_for("index"))
 
@@ -220,9 +228,20 @@ def delete_setlist_route(setlist_id: int):
     return redirect(url_for("index"))
 
 
-@app.get("/uploads/<path:relative_path>")
-def serve_uploaded(relative_path: str):
-    return send_from_directory(PROJECT_ROOT, relative_path)
+@app.get("/uploads/<path:file_path>")
+def serve_uploaded(file_path: str):
+    target = Path(file_path)
+    if not target.is_file():
+        abs_candidate = Path("/" + file_path.lstrip("/"))
+        if abs_candidate.is_file():
+            target = abs_candidate
+        elif (PACKAGE_ROOT / file_path).is_file():
+            target = PACKAGE_ROOT / file_path
+        elif (PROJECT_ROOT / file_path).is_file():
+            target = PROJECT_ROOT / file_path
+    if target.is_file():
+        return send_from_directory(target.parent, target.name)
+    return "File not found", 404
 
 
 @app.get("/settings")

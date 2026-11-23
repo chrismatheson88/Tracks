@@ -108,7 +108,7 @@
                         <span>Channel {{ track.output_channel }}</span>
                       </div>
                       <audio controls preload="none">
-                        <source src="/uploads/{{ track.file_path }}" type="audio/wav" />
+                        <source src="/uploads/{{ track.file_path.lstrip('/') }}" type="audio/wav" />
                         Your browser does not support audio playback.
                       </audio>
                     </div>

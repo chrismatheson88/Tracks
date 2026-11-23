@@ -7,11 +7,30 @@ from ..models import SongTrack
 
 
 SUPPORTED_AUDIO_SUFFIXES = {".wav", ".mp3"}
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+CANONICAL_UPLOAD_DIR = PACKAGE_ROOT / "uploaded_tracks"
+
+
+def get_song_storage_dir(song_id: int, project_root: Path = PACKAGE_ROOT) -> Path:
+    """Return the base storage directory for a song: uploaded_tracks/<song-id>"""
+    return project_root / "uploaded_tracks" / str(song_id)
+
+
+def get_song_tracks_dir(song_id: int, project_root: Path = PACKAGE_ROOT) -> Path:
+    """Return the tracks directory for a song: uploaded_tracks/<song-id>/tracks"""
+    return get_song_storage_dir(song_id, project_root) / "tracks"
+
+
+def remove_song_storage(song_id: int, project_root: Path = PACKAGE_ROOT) -> None:
+    """Completely remove uploaded_tracks/<song-id> directory when a song is deleted."""
+    song_dir = get_song_storage_dir(song_id, project_root)
+    if song_dir.exists():
+        shutil.rmtree(song_dir, ignore_errors=True)
 
 
 def copy_tracks_to_song_directory(project_root: Path, song_id: int, tracks: list[SongTrack]) -> list[SongTrack]:
     """Copy pending WAV/MP3 tracks into uploaded_tracks/<song-id>/tracks."""
-    app_track_dir = project_root / "uploaded_tracks" / str(song_id) / "tracks"
+    app_track_dir = get_song_tracks_dir(song_id, project_root)
     app_track_dir.mkdir(parents=True, exist_ok=True)
 
     for existing in app_track_dir.iterdir():
@@ -19,7 +38,7 @@ def copy_tracks_to_song_directory(project_root: Path, song_id: int, tracks: list
             existing.unlink()
 
     copied_tracks: list[SongTrack] = []
-    for index, track in enumerate(tracks):
+    for track in tracks:
         source = Path(track.file_path)
         if not source.is_file():
             continue
@@ -36,7 +55,7 @@ def copy_tracks_to_song_directory(project_root: Path, song_id: int, tracks: list
 
 
 def clear_song_track_directory(project_root: Path, song_id: int) -> None:
-    app_track_dir = project_root / "uploaded_tracks" / str(song_id) / "tracks"
+    app_track_dir = get_song_tracks_dir(song_id, project_root)
     if not app_track_dir.exists():
         return
     for existing in app_track_dir.iterdir():

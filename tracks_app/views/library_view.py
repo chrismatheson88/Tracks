@@ -26,7 +26,11 @@ from PySide6.QtWidgets import (
 from ..db import delete_song, list_songs, save_song
 from ..models import Song
 from ..playback import inspect_wav_directory
-from ..services.audio_attachment_service import clear_song_track_directory, copy_tracks_to_song_directory
+from ..services.audio_attachment_service import (
+    clear_song_track_directory,
+    copy_tracks_to_song_directory,
+    remove_song_storage,
+)
 
 
 def build_library_view(window) -> QWidget:
@@ -236,9 +240,7 @@ class LibraryViewMixin:
             song_id = self.current_song.id
             delete_song(song_id)
             if song_id is not None:
-                song_storage = Path(__file__).resolve().parent.parent / "uploaded_tracks" / str(song_id)
-                if song_storage.exists():
-                    shutil.rmtree(song_storage, ignore_errors=True)
+                remove_song_storage(int(song_id))
             self.current_song = None
             self.library_details.clear()
             self.refresh_library()

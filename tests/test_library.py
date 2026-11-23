@@ -605,3 +605,52 @@ def test_inspect_wav_directory_assigns_stereo_channel_offset(tmp_path):
     # Mono track 2 gets channel 2
     assert tracks[1].output_channel == 2
 
+
+def test_web_create_song_uploads_tracks_to_canonical_directory():
+    import io
+    from pathlib import Path
+    from tracks_app.web import app
+    from tracks_app.db import list_songs
+    from tracks_app.services.audio_attachment_service import get_song_tracks_dir, remove_song_storage
+
+    client = app.test_client()
+    response = client.post(
+        "/songs",
+        data={
+            "title": "Web Upload Test",
+            "artist": "Web Band",
+            "tempo": "120",
+            "key": "A",
+            "time_signature": "4/4",
+            "notes": "Testing canonical upload",
+            "tracks": (io.BytesIO(b"RIFFdummydataWAVE"), "test_track.wav"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    db_path = app.config.get("DB_PATH", "tracks_library.sqlite3")
+    songs = list_songs(db_path)
+    created = next(s for s in songs if s.title == "Web Upload Test")
+    assert len(created.tracks) == 1
+
+    tracks_dir = get_song_tracks_dir(created.id)
+    saved_file = tracks_dir / "test_track.wav"
+    try:
+        assert saved_file.exists()
+        assert Path(created.tracks[0].file_path).resolve() == saved_file.resolve()
+
+        # Test serving uploaded file
+        clean_path = created.tracks[0].file_path.lstrip('/')
+        serve_resp = client.get(f"/uploads/{clean_path}")
+        assert serve_resp.status_code == 200
+        assert serve_resp.data == b"RIFFdummydataWAVE"
+
+        # Test deleting song removes storage
+        del_resp = client.post(f"/songs/{created.id}/delete", follow_redirects=False)
+        assert del_resp.status_code == 302
+        assert not tracks_dir.exists()
+    finally:
+        remove_song_storage(created.id)
+
+
