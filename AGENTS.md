@@ -96,7 +96,7 @@ These bundled assets are app code/resources and may be committed to Git when app
 
 User-selected WAV/MP3 directories are not treated as permanent source-directory references only. The app copies accepted files into:
 
-- `tracks_app/uploaded_tracks/<song-id>/tracks/`
+- `uploaded_tracks/<song-id>/tracks/`
 
 The `<song-id>` is the SQLite song row ID. It should be treated as a storage identifier, not as user-visible content.
 
@@ -228,7 +228,7 @@ PY
 - `save_song` recreates/updates track rows from `song.tracks`; do not assume omitted tracks remain untouched.
 - SQLite connections must enable `PRAGMA foreign_keys = ON;` so cascading deletes (`ON DELETE CASCADE`) are enforced.
 - Set-entry overrides are persisted separately from library-song fields.
-- User audio paths must be app-local after save: store paths inside `tracks_app/uploaded_tracks/<song-id>/tracks/` rather than temporary source-directory paths.
+- User audio paths must be app-local after save: store paths inside `uploaded_tracks/<song-id>/tracks/` rather than temporary source-directory paths.
 - Song deletion should remove or orphan-clean uploaded-track storage for that song ID.
 - If adopting `AUTOINCREMENT`, use a migration strategy rather than changing table creation assumptions silently.
 
@@ -333,7 +333,7 @@ Do not use local VS Code history or generated snapshots as a normal source of tr
 
 - Ensure deletion of a song removes or orphan-cleans its uploaded-track directory.
 - Consider `AUTOINCREMENT` or explicit cleanup before reusing SQLite song IDs.
-- Avoid duplicate `uploaded_tracks/` locations; the active desktop location is `tracks_app/uploaded_tracks/<song-id>/tracks/`.
+- Avoid duplicate `uploaded_tracks/` locations; the active canonical location is `uploaded_tracks/<song-id>/tracks/` in the repository root.
 - Clear attachment is pending until Save; do not silently delete copied files on Cancel or browse.
 - Verify `save_song` recreates tracks and does not preserve stale track rows unexpectedly.
 - Monitor callback channel width and stale buffer data after device changes.
