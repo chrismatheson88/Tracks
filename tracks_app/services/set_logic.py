@@ -1,23 +1,37 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QDate, QTime
+from datetime import date, datetime, time
 
 from ..models import Setlist, SetlistEntry, Song
 
 
+def _parse_date(date_str: str | None) -> date:
+    if not date_str:
+        return date(1900, 1, 1)
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            pass
+    return date(1900, 1, 1)
+
+
+def _parse_time(time_str: str | None) -> time:
+    if not time_str:
+        return time(0, 0)
+    try:
+        return datetime.strptime(time_str, "%H:%M").time()
+    except ValueError:
+        return time(0, 0)
+
+
 def setlists_sorted_by_datetime_desc(setlists: list[Setlist]) -> list[Setlist]:
-    def sort_key(setlist: Setlist) -> tuple[QDate, QTime, int]:
-        date = QDate.fromString(setlist.set_date or "", "dd-MM-yyyy")
-        if not date.isValid():
-            date = QDate.fromString(setlist.set_date or "", "yyyy-MM-dd")
-        if not date.isValid():
-            date = QDate(1900, 1, 1)
-
-        time = QTime.fromString(setlist.set_time or "", "HH:mm")
-        if not time.isValid():
-            time = QTime(0, 0)
-
-        return (date, time, int(setlist.id or 0))
+    def sort_key(setlist: Setlist) -> tuple[date, time, int]:
+        return (
+            _parse_date(setlist.set_date),
+            _parse_time(setlist.set_time),
+            int(setlist.id or 0),
+        )
 
     return sorted(setlists, key=sort_key, reverse=True)
 
@@ -26,13 +40,12 @@ def format_set_date_for_display(set_date: str) -> str:
     if not set_date:
         return ""
 
-    date = QDate.fromString(set_date, "dd-MM-yyyy")
-    if date.isValid():
-        return date.toString("dd-MM-yyyy")
-
-    legacy_date = QDate.fromString(set_date, "yyyy-MM-dd")
-    if legacy_date.isValid():
-        return legacy_date.toString("dd-MM-yyyy")
+    for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(set_date, fmt).date()
+            return parsed.strftime("%d-%m-%Y")
+        except ValueError:
+            pass
 
     return set_date
 

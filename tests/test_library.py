@@ -654,3 +654,29 @@ def test_web_create_song_uploads_tracks_to_canonical_directory():
         remove_song_storage(created.id)
 
 
+def test_set_logic_sorting_and_formatting():
+    from tracks_app.models import Setlist
+    from tracks_app.services.set_logic import (
+        format_set_date_for_display,
+        set_picker_list_label,
+        setlists_sorted_by_datetime_desc,
+    )
+
+    assert format_set_date_for_display("20-11-2026") == "20-11-2026"
+    assert format_set_date_for_display("2026-11-20") == "20-11-2026"
+    assert format_set_date_for_display("") == ""
+    assert format_set_date_for_display("not-a-date") == "not-a-date"
+
+    s1 = Setlist(id=1, name="Earliest", set_date="10-11-2026", set_time="19:00")
+    s2 = Setlist(id=2, name="Latest", set_date="20-11-2026", set_time="20:00")
+    s3 = Setlist(id=3, name="Middle", set_date="2026-11-15", set_time="18:00")
+    s_undated = Setlist(id=4, name="Undated", set_date="", set_time="")
+
+    sorted_sets = setlists_sorted_by_datetime_desc([s1, s_undated, s3, s2])
+    assert [s.id for s in sorted_sets] == [2, 3, 1, 4]
+
+    assert set_picker_list_label(s2) == "Latest (20-11-2026 20:00)"
+    assert set_picker_list_label(s_undated) == "Undated"
+
+
+
