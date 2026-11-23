@@ -445,8 +445,8 @@ class TracksDesktopWindow(LibraryViewMixin, SetViewMixin, SettingsViewMixin, QMa
             self.refresh_sets()
 
     @staticmethod
-    def db_to_linear(db: int) -> float:
-        return db_to_linear(db)
+    def db_to_linear(*args) -> float:
+        return db_to_linear(args[-1])
 
     def song_with_entry_overrides(self, entry: SetlistEntry) -> Song:
         return song_with_entry_overrides(entry)
