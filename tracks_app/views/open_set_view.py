@@ -158,6 +158,109 @@ class SetViewMixin:
         self.refresh_sets()
         self.show_sets_view()
 
+    def delete_selected_set(self) -> None:
+        item = self.set_list.currentItem()
+        if not item:
+            return
+        set_id = item.data(Qt.UserRole)
+        answer = QMessageBox.question(self, "Delete set", f"Delete '{item.text().split(' — ')[0]}'?")
+        if answer == QMessageBox.Yes:
+            delete_setlist(set_id)
+            self.refresh_sets()
+
+    def add_song_to_open_set(self) -> None:
+        if not self.current_set:
+            return
+        song_id = self.add_song_combo.currentData()
+        if song_id is None:
+            return
+        self.current_set.entries.append(SetlistEntry(song_id=song_id, order_index=len(self.current_set.entries)))
+        save_setlist(self.current_set)
+        self.open_set(self.current_set.id)
+        self.refresh_sets()
+        self.add_song_combo.blockSignals(True)
+        self.add_song_combo.setCurrentIndex(0)
+        self.add_song_combo.lineEdit().clear()
+        self.add_song_combo.blockSignals(False)
+
+    def add_new_song_from_open_set(self) -> None:
+        if not self.current_set:
+            QMessageBox.information(self, "No set selected", "Open a set before adding a new song.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add new song")
+        dialog.setModal(True)
+
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        title_input = QLineEdit()
+        artist_input = QLineEdit("Unknown")
+        tempo_input = QSpinBox()
+        tempo_input.setRange(40, 260)
+        tempo_input.setValue(120)
+        key_input = QLineEdit("C")
+        time_signature_input = QComboBox()
+        time_signature_input.addItems(["4/4", "3/4", "6/8", "12/8", "2/2", "5/4"])
+        notes_input = QLineEdit()
+        notes_input.setMaximumHeight(90)
+
+        form.addRow("Title:", title_input)
+        form.addRow("Artist:", artist_input)
+        form.addRow("Tempo (BPM):", tempo_input)
+        form.addRow("Key:", key_input)
+        form.addRow("Time signature:", time_signature_input)
+        form.addRow("Notes:", notes_input)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        title_input.setFocus()
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        title = title_input.text().strip()
+        if not title:
+            QMessageBox.warning(self, "Missing title", "A song title is required.")
+            return
+
+        new_song = Song(
+            title=title,
+            artist=artist_input.text().strip() or "Unknown",
+            tempo=int(tempo_input.value()),
+            key=key_input.text().strip() or "C",
+            time_signature=time_signature_input.currentText(),
+            notes=notes_input.text().strip(),
+        )
+        saved_song = save_song(new_song)
+
+        self.current_set.entries.append(
+            SetlistEntry(song_id=saved_song.id, order_index=len(self.current_set.entries))
+        )
+        save_setlist(self.current_set)
+
+        self.refresh_library()
+        self.refresh_sets()
+        self.open_set(self.current_set.id)
+        self.open_set_song_list.setCurrentRow(self.open_set_song_list.count() - 1)
+
+    def remove_song_from_open_set(self) -> None:
+        if not self.current_set:
+            return
+        row = self.open_set_song_list.currentRow()
+        if row < 0:
+            return
+        self.current_set.entries.pop(row)
+        for index, remaining in enumerate(self.current_set.entries):
+            remaining.order_index = index
+        save_setlist(self.current_set)
+        self.open_set(self.current_set.id)
+        self.refresh_sets()
+
     def edit_current_set_info(self) -> None:
         if not self.current_set:
             QMessageBox.information(self, "No set selected", "Open a set before editing set info.")
