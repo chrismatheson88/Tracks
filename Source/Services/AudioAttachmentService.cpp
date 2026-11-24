@@ -13,10 +13,10 @@ fs::path AudioAttachmentService::getProjectRoot() {
     // Navigate from app bundle or executable to repository/working root
     auto appFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
     fs::path p(appFile.getFullPathName().toStdString());
-    // In build/juce_app/Tracks_artefacts/..., walk up until we see 'uploaded_tracks' or repo root
+    // In build/Tracks_artefacts/..., walk up until we see 'CMakeLists.txt', 'uploaded_tracks', or 'assets'
     fs::path cur = p.parent_path();
     while (!cur.empty() && cur != cur.parent_path()) {
-        if (fs::exists(cur / "tracks_app") || fs::exists(cur / "uploaded_tracks")) {
+        if (fs::exists(cur / "CMakeLists.txt") || fs::exists(cur / "uploaded_tracks") || fs::exists(cur / "assets")) {
             return cur;
         }
         cur = cur.parent_path();

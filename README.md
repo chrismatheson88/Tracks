@@ -1,35 +1,46 @@
 # Tracks
 
-Tracks is a self-contained desktop backing-track library app. It stores songs, tempos, keys, WAV files, set lists, and app settings locally. Desktop playback, click tones, and count-in voices do not depend on a browser or OS speech service.
+Tracks is a high-performance, real-time desktop music library, set list manager, multi-channel backing track player, and metronome/count-in application built with native C++ and JUCE 8.
 
 ## Features
 
-- Store songs with title, artist, tempo, key, and time signature.
-- Attach multiple WAV files to each song.
-- Keep track metadata such as output channel and gain.
-- Manage set lists and edit song metadata in the desktop set playback view.
-- Use native multi-channel audio output.
-- Play every metronome beat with a two-bar count-in.
-- Use bundled count-in voice WAV files and generated click tones.
+- **Music Library**: Store songs with title, artist, tempo, key, time signature, and notes.
+- **Multi-Track Backing Player**: Attach multiple WAV or MP3 stem files to each song with per-track gain, channel routing, and mute controls.
+- **Smart Stereo Routing**: Stereo tracks route across `[channel, channel + 1]` if available, with automatic mono downmix fallback at the hardware channel boundary.
+- **Set List Management**: Create and organize set lists, reorder songs on stage, and apply per-set overrides (tempo, key, time signature) with optional "Save Edits to Library" synchronization.
+- **Real-Time Metronome & Count-In**:
+  - 4/4 standard time with a 2-bar spoken voice count-in (`"one"`, `[rest]`, `"two"`, `[rest]`, `"one"`, `"two"`, `"three"`, `"four"`).
+  - 6/8 and 12/8 compound meters with dotted-quarter tempo spacing and accent pulses.
+  - Dedicated hardware routing channels and volume controls for Click and Guide.
+- **Live Output Peak Metering**: Real-time multi-channel LED level meters with smooth exponential decay.
+- **Self-Contained & Offline**: Embedded audio assets (clicks and female count-in voice) and local SQLite3 database.
 
-## Native desktop quick start
+## Quick Start (macOS)
+
+### Prerequisites
+- macOS with Xcode Command Line Tools installed (`clang++`, `make`)
+- CMake 3.22+
+
+### Build and Launch
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m tracks_app
+# Configure with CMake
+.venv/bin/cmake -B build -S .
+
+# Build the Tracks application
+.venv/bin/cmake --build build --target Tracks -j 8
+
+# Run automated tests
+.venv/bin/cmake --build build --target DatabaseTests AudioEngineTests -j 8
+./build/DatabaseTests
+./build/AudioEngineTests
+
+# Launch Tracks
+open build/Tracks_artefacts/Tracks.app
 ```
 
-## Portable build
+## Project Structure
 
-The SQLite database, bundled count-in WAV assets, Python source, and installed dependencies can be packaged with PyInstaller. Moving the full source folder to macOS or Windows also allows building a native executable on that device.
-
-## Count-in assets
-
-Bundled count-in voice files are in:
-
-`tracks_app/assets/countin/female/`
-
-No browser or system speech synthesis is used at runtime.
+- `Source/` — C++ application code (Models, Database, Audio Engine, Metronome, UI Views, Widgets).
+- `assets/` — Embedded click WAVs and voice count-in WAVs.
+- `CMakeLists.txt` — CMake build configuration linking JUCE 8 and native SQLite3.
