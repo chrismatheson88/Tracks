@@ -496,19 +496,24 @@ void OpenSetView::resized() {
 
     // Left Area: Song list in set
     auto leftArea = area;
-    auto addSongBar = leftArea.removeFromTop(32);
-    addSongPicker_.setBounds(addSongBar.removeFromLeft(240));
+
+    // Controls below the setlist
+    auto bottomControls = leftArea.removeFromBottom(72);
+
+    auto addSongBar = bottomControls.removeFromTop(30);
+    addSongPicker_.setBounds(addSongBar.removeFromLeft(260));
     addSongBar.removeFromLeft(8);
     addSongButton_.setBounds(addSongBar.removeFromLeft(110));
 
-    auto bottomButtons = leftArea.removeFromBottom(32);
-    moveUpButton_.setBounds(bottomButtons.removeFromLeft(100));
-    bottomButtons.removeFromLeft(8);
-    moveDownButton_.setBounds(bottomButtons.removeFromLeft(110));
-    bottomButtons.removeFromLeft(8);
-    removeSongButton_.setBounds(bottomButtons.removeFromLeft(120));
+    bottomControls.removeFromTop(10);
 
-    leftArea.removeFromTop(12);
+    auto actionButtons = bottomControls.removeFromTop(30);
+    moveUpButton_.setBounds(actionButtons.removeFromLeft(90));
+    actionButtons.removeFromLeft(8);
+    moveDownButton_.setBounds(actionButtons.removeFromLeft(100));
+    actionButtons.removeFromLeft(8);
+    removeSongButton_.setBounds(actionButtons.removeFromLeft(110));
+
     leftArea.removeFromBottom(12);
     entryListBox_.setBounds(leftArea);
 }
