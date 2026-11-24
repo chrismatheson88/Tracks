@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "Services/AudioAttachmentService.h"
+#include <cstdlib>
 
 namespace tracks {
 
@@ -28,6 +29,10 @@ MainComponent::MainComponent() {
     setupNavBtn(navLibraryButton_, ActiveView::Library);
     setupNavBtn(navOpenSetButton_, ActiveView::OpenSet);
     setupNavBtn(navSettingsButton_, ActiveView::Settings);
+
+    relaunchButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
+    relaunchButton_.onClick = [this]() { relaunchApp(); };
+    addAndMakeVisible(relaunchButton_);
 
     // Initialize views
     libraryView_ = std::make_unique<LibraryView>(*db_, *audioEngine_);
@@ -123,6 +128,9 @@ void MainComponent::resized() {
 
     // Top Navigation Bar (height 48)
     auto topBar = area.removeFromTop(48).reduced(12, 8);
+    relaunchButton_.setBounds(topBar.removeFromRight(85));
+    topBar.removeFromRight(12);
+
     brandLabel_.setBounds(topBar.removeFromLeft(90));
     topBar.removeFromLeft(20);
 
@@ -140,6 +148,19 @@ void MainComponent::resized() {
     if (libraryView_->isVisible()) libraryView_->setBounds(area);
     if (openSetView_->isVisible()) openSetView_->setBounds(area);
     if (settingsView_->isVisible()) settingsView_->setBounds(area);
+}
+
+void MainComponent::relaunchApp() {
+    auto appFile = juce::File::getSpecialLocation(juce::File::currentExecutableFile);
+    auto bundle = appFile.getParentDirectory().getParentDirectory().getParentDirectory();
+    juce::String targetPath = (bundle.hasFileExtension(".app") && bundle.isDirectory())
+                                  ? bundle.getFullPathName()
+                                  : appFile.getFullPathName();
+
+    juce::String cmd = "/bin/sh -c 'sleep 0.2; open -n \"" + targetPath + "\"' &";
+    std::system(cmd.toRawUTF8());
+
+    juce::JUCEApplication::getInstance()->systemRequestedQuit();
 }
 
 } // namespace tracks

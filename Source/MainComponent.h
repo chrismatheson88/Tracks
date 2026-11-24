@@ -36,6 +36,7 @@ private:
     juce::TextButton navLibraryButton_{"Library"};
     juce::TextButton navOpenSetButton_{"Open Set"};
     juce::TextButton navSettingsButton_{"Settings"};
+    juce::TextButton relaunchButton_{"Relaunch"};
 
     // Views
     std::unique_ptr<LibraryView> libraryView_;
@@ -49,6 +50,7 @@ private:
     void switchView(ActiveView view);
     void updateNavButtonStyles();
     void playSong(const Song& song);
+    void relaunchApp();
 };
 
 } // namespace tracks
