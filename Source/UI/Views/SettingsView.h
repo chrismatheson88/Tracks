@@ -26,7 +26,7 @@ private:
     juce::Label deviceSectionLabel_{{}, "AUDIO OUTPUT DEVICE"};
     juce::Label deviceLabel_{{}, "Output Device:"};
     juce::ComboBox deviceBox_;
-    juce::TextButton refreshDevicesButton_{"🔄 Refresh"};
+    juce::TextButton refreshDevicesButton_{"Refresh"};
     juce::Label channelCountLabel_;
 
     // Routing

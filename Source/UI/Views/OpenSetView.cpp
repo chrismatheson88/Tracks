@@ -288,7 +288,7 @@ void OpenSetView::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, 
     g.drawText(songArtist, 36, 20, width - 200, 14, juce::Justification::centredLeft, true);
 
     // Effective settings badge
-    juce::String details = juce::String(effTempo) + " BPM  •  " + juce::String(effKey) + "  •  " + juce::String(effTimeSig);
+    juce::String details = juce::String(effTempo) + " BPM  |  " + juce::String(effKey) + "  |  " + juce::String(effTimeSig);
     if (entry.overrideTempo.has_value() || entry.overrideKey.has_value() || entry.overrideTimeSignature.has_value()) {
         details += " (Custom)";
         g.setColour(AppTheme::warningAmber);

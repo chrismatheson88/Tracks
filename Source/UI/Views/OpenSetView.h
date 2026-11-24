@@ -37,7 +37,7 @@ private:
     // Top set selection
     juce::Label setSelectLabel_{{}, "Setlist:"};
     juce::ComboBox setPicker_;
-    juce::TextButton newSetButton_{"+ New Set"};
+    juce::TextButton newSetButton_{"New Set"};
     juce::TextButton deleteSetButton_{"Delete Set"};
 
     // Set metadata
@@ -55,12 +55,12 @@ private:
 
     // Set songs table
     juce::ListBox entryListBox_;
-    juce::TextButton moveUpButton_{"▲ Move Up"};
-    juce::TextButton moveDownButton_{"▼ Move Down"};
+    juce::TextButton moveUpButton_{"Move Up"};
+    juce::TextButton moveDownButton_{"Move Down"};
     juce::TextButton removeSongButton_{"Remove Song"};
 
     juce::ComboBox addSongPicker_;
-    juce::TextButton addSongButton_{"+ Add to Set"};
+    juce::TextButton addSongButton_{"Add to Set"};
 
     // Overrides section
     juce::Label overridesHeader_{{}, "Song Overrides in This Set:"};

@@ -34,8 +34,8 @@ public:
 private:
     AudioEngine& audioEngine_;
 
-    juce::TextButton playPauseButton_{"▶ Play"};
-    juce::TextButton stopButton_{"■ Stop"};
+    juce::TextButton playPauseButton_{"Play"};
+    juce::TextButton stopButton_{"Stop"};
 
     juce::Label songTitleLabel_;
     juce::Label songArtistLabel_;

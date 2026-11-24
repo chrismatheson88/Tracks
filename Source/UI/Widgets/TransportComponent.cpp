@@ -117,10 +117,10 @@ void TransportComponent::setSongInfo(const std::string& title,
 
 void TransportComponent::setPlayingState(bool isPlaying, bool isPaused) {
     if (isPlaying && !isPaused) {
-        playPauseButton_.setButtonText("⏸ Pause");
+        playPauseButton_.setButtonText("Pause");
         playPauseButton_.setColour(juce::TextButton::buttonColourId, AppTheme::warningAmber);
     } else {
-        playPauseButton_.setButtonText("▶ Play");
+        playPauseButton_.setButtonText("Play");
         playPauseButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
     }
 }

@@ -38,7 +38,7 @@ private:
 
     // Left panel: Song list
     juce::ListBox songListBox_;
-    juce::TextButton newSongButton_{"+ New Song"};
+    juce::TextButton newSongButton_{"New Song"};
     juce::TextButton deleteSongButton_{"Delete Song"};
 
     // Right panel: Editor
@@ -64,7 +64,7 @@ private:
 
     // Attachment section
     juce::Label attachmentHeader_{{}, "Audio Stems / Backing Tracks:"};
-    juce::TextButton attachFolderButton_{"📁 Select Audio Folder..."};
+    juce::TextButton attachFolderButton_{"Select Audio Folder..."};
     juce::Label attachmentStatusLabel_;
 
     // Tracks viewport / component
