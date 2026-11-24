@@ -74,6 +74,22 @@ MainComponent::MainComponent() {
     transport_->onGuideGainChanged = [this](float g) {
         audioEngine_->setGuideGain(g);
     };
+    transport_->onClickChannelChanged = [this](int ch) {
+        db_->setAppSetting("volume.channel.click_db", std::to_string(ch));
+    };
+    transport_->onGuideChannelChanged = [this](int ch) {
+        db_->setAppSetting("volume.channel.guide_db", std::to_string(ch));
+    };
+    transport_->onTrackMixChanged = [this](int64_t trackId, float gain, int outputChannel, bool stereoOutput) {
+        db_->updateTrackMix(trackId, gain, outputChannel, stereoOutput);
+    };
+    transport_->onSongClickSubdivisionsChanged = [this](int64_t songId, bool eighths, bool sixteenths, float eighthsGain, float sixteenthsGain) {
+        db_->updateSongClickSubdivisions(songId, eighths, sixteenths, eighthsGain, sixteenthsGain);
+        if (openSetView_) {
+            openSetView_->syncSongClickSubdivisions(songId, eighths, sixteenths, eighthsGain, sixteenthsGain);
+        }
+    };
+    transport_->syncClickAndGuideChannels(audioEngine_->getClickChannel(), audioEngine_->getGuideChannel());
     addAndMakeVisible(transport_.get());
 
     switchView(ActiveView::Library);
@@ -83,6 +99,8 @@ MainComponent::MainComponent() {
 void MainComponent::playSong(const Song& song) {
     audioEngine_->loadSong(song);
     transport_->setSongInfo(song.title, song.artist, song.tempo, song.key, song.timeSignature);
+    transport_->syncTracksAvailability(song.id, song.tracks, audioEngine_->hasLoadedTracks(), song.sections);
+    transport_->syncClickSubdivisions(song.id, song.clickEighths, song.clickSixteenths, song.clickEighthsGain, song.clickSixteenthsGain);
 }
 
 void MainComponent::switchView(ActiveView view) {
@@ -95,6 +113,7 @@ void MainComponent::switchView(ActiveView view) {
     if (activeView_ == ActiveView::Library) {
         libraryView_->refreshSongList();
     } else if (activeView_ == ActiveView::OpenSet) {
+        transport_->syncClickAndGuideChannels(audioEngine_->getClickChannel(), audioEngine_->getGuideChannel());
         openSetView_->refreshSetlists();
     } else if (activeView_ == ActiveView::Settings) {
         settingsView_->refreshSettings();
@@ -140,14 +159,22 @@ void MainComponent::resized() {
     topBar.removeFromLeft(8);
     navSettingsButton_.setBounds(topBar.removeFromLeft(100));
 
-    // Bottom Transport Bar (height 84)
-    auto transportArea = area.removeFromBottom(84);
-    transport_->setBounds(transportArea);
+    if (activeView_ == ActiveView::OpenSet) {
+        openSetView_->setBounds(area);
+        transport_->setLayoutMode(TransportComponent::LayoutMode::ExpandedPanel);
+        auto transportBounds = openSetView_->getTransportArea().translated(openSetView_->getX(), openSetView_->getY());
+        transport_->setBounds(transportBounds);
+        transport_->toFront(false);
+    } else {
+        // Bottom Transport Bar (height 84)
+        auto transportArea = area.removeFromBottom(84);
+        transport_->setLayoutMode(TransportComponent::LayoutMode::DockedBar);
+        transport_->setBounds(transportArea);
 
-    // Main view content area
-    if (libraryView_->isVisible()) libraryView_->setBounds(area);
-    if (openSetView_->isVisible()) openSetView_->setBounds(area);
-    if (settingsView_->isVisible()) settingsView_->setBounds(area);
+        // Main view content area
+        if (libraryView_->isVisible()) libraryView_->setBounds(area);
+        if (settingsView_->isVisible()) settingsView_->setBounds(area);
+    }
 }
 
 void MainComponent::relaunchApp() {

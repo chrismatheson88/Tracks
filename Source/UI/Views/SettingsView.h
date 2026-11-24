@@ -44,7 +44,7 @@ private:
     juce::Label clickSoundLabel_{{}, "Click Sound:"};
     juce::ComboBox clickSoundBox_;
 
-    juce::Label voiceLabel_{{}, "Count-in Voice:"};
+    juce::Label voiceLabel_{{}, "Guide Voice:"};
     juce::ComboBox voiceBox_;
 
     // Volumes
@@ -60,6 +60,7 @@ private:
     juce::Slider guideVolSlider_;
 
     void populateDevices();
+    void populateChannelBoxes();
     void saveSetting(const std::string& key, const std::string& val);
 };
 

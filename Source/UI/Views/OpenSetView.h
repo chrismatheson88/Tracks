@@ -15,6 +15,11 @@ public:
 
     void refreshSetlists();
     void selectSetlist(int64_t setId);
+    void syncSongClickSubdivisions(int64_t songId,
+                                   bool clickEighths,
+                                   bool clickSixteenths,
+                                   float clickEighthsGain,
+                                   float clickSixteenthsGain);
 
     std::function<void(const Song&)> onSongSelectedForPlayback;
 
@@ -25,6 +30,7 @@ public:
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    juce::Rectangle<int> getTransportArea() const { return transportArea_; }
 
 private:
     DatabaseService& db_;
@@ -34,51 +40,42 @@ private:
     std::optional<Setlist> currentSetlist_;
     int selectedEntryIndex_ = -1;
 
-    // Top set selection
+    // Top set selection, date, and time
     juce::Label setSelectLabel_{{}, "Setlist:"};
     juce::ComboBox setPicker_;
-    juce::TextButton newSetButton_{"New Set"};
-    juce::TextButton deleteSetButton_{"Delete Set"};
-
-    // Set metadata
-    juce::Label nameLabel_{{}, "Name:"};
-    juce::TextEditor nameEditor_;
-
     juce::Label dateLabel_{{}, "Date:"};
     juce::TextEditor dateEditor_;
     juce::TextButton datePickerButton_{"Pick"};
-
     juce::Label timeLabel_{{}, "Time:"};
     juce::TextEditor timeEditor_;
     juce::TextButton timePickerButton_{"Pick"};
-
-    juce::Label notesLabel_{{}, "Notes:"};
-    juce::TextEditor notesEditor_;
+    juce::TextButton newSetButton_{"New Set"};
+    juce::TextButton deleteSetButton_{"Delete Set"};
 
     // Set songs table
     juce::ListBox entryListBox_;
     juce::TextButton moveUpButton_{"Move Up"};
     juce::TextButton moveDownButton_{"Move Down"};
-    juce::TextButton removeSongButton_{"Remove Song"};
+    juce::TextButton removeSongButton_{"Remove"};
 
     juce::ComboBox addSongPicker_;
-    juce::TextButton addSongButton_{"Add to Set"};
 
-    // Overrides section
-    juce::Label overridesHeader_{{}, "Song Overrides in This Set:"};
-    juce::Label overrideTempoLabel_{{}, "Override Tempo:"};
+    // Current song overrides section
+    juce::Label overridesHeader_{{}, "Current Song"};
+    juce::Label overrideTempoLabel_{{}, "Tempo:"};
     juce::TextEditor overrideTempoEditor_;
 
-    juce::Label overrideKeyLabel_{{}, "Override Key:"};
+    juce::Label overrideKeyLabel_{{}, "Key:"};
     juce::ComboBox overrideKeyBox_;
 
-    juce::Label overrideTimeSigLabel_{{}, "Override Time Signature:"};
+    juce::Label overrideTimeSigLabel_{{}, "Time Signature:"};
     juce::ComboBox overrideTimeSigBox_;
 
-    juce::TextButton saveOverrideToLibraryButton_{"Save Edits to Library"};
-    juce::TextButton saveSetButton_{"Save Setlist"};
+    juce::TextButton saveOverrideToLibraryButton_{"Save"};
+    juce::Rectangle<int> transportArea_;
 
-    void loadSetlistToUI(const Setlist& setlist);
+    void loadSetlistToUI(const Setlist& setlist, bool preserveSelection = false);
+    void preloadCurrentSetlist();
     void saveCurrentSetlist();
     void updateOverridesUI();
     void applyOverridesFromUI();

@@ -82,12 +82,28 @@ void DatabaseService::ensureSchema() {
         "  tempo INTEGER NOT NULL,"
         "  key TEXT NOT NULL,"
         "  notes TEXT DEFAULT '',"
-        "  time_signature TEXT NOT NULL DEFAULT '4/4'"
+        "  time_signature TEXT NOT NULL DEFAULT '4/4',"
+        "  click_eighths INTEGER NOT NULL DEFAULT 0,"
+        "  click_sixteenths INTEGER NOT NULL DEFAULT 0,"
+        "  click_eighths_gain REAL NOT NULL DEFAULT 1.0,"
+        "  click_sixteenths_gain REAL NOT NULL DEFAULT 1.0"
         ");"
     );
 
     if (!columnExists("songs", "time_signature")) {
         executeSimple("ALTER TABLE songs ADD COLUMN time_signature TEXT NOT NULL DEFAULT '4/4';");
+    }
+    if (!columnExists("songs", "click_eighths")) {
+        executeSimple("ALTER TABLE songs ADD COLUMN click_eighths INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!columnExists("songs", "click_sixteenths")) {
+        executeSimple("ALTER TABLE songs ADD COLUMN click_sixteenths INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!columnExists("songs", "click_eighths_gain")) {
+        executeSimple("ALTER TABLE songs ADD COLUMN click_eighths_gain REAL NOT NULL DEFAULT 1.0;");
+    }
+    if (!columnExists("songs", "click_sixteenths_gain")) {
+        executeSimple("ALTER TABLE songs ADD COLUMN click_sixteenths_gain REAL NOT NULL DEFAULT 1.0;");
     }
 
     executeSimple(
@@ -99,6 +115,30 @@ void DatabaseService::ensureSchema() {
         "  output_channel INTEGER NOT NULL,"
         "  gain REAL NOT NULL DEFAULT 1.0,"
         "  muted INTEGER NOT NULL DEFAULT 0,"
+        "  track_key TEXT DEFAULT '',"
+        "  num_channels INTEGER NOT NULL DEFAULT 0,"
+        "  stereo_output INTEGER NOT NULL DEFAULT 1,"
+        "  FOREIGN KEY(song_id) REFERENCES songs(id) ON DELETE CASCADE"
+        ");"
+    );
+
+    if (!columnExists("tracks", "track_key")) {
+        executeSimple("ALTER TABLE tracks ADD COLUMN track_key TEXT DEFAULT '';");
+    }
+    if (!columnExists("tracks", "num_channels")) {
+        executeSimple("ALTER TABLE tracks ADD COLUMN num_channels INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!columnExists("tracks", "stereo_output")) {
+        executeSimple("ALTER TABLE tracks ADD COLUMN stereo_output INTEGER NOT NULL DEFAULT 1;");
+    }
+
+    executeSimple(
+        "CREATE TABLE IF NOT EXISTS song_sections ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  song_id INTEGER NOT NULL,"
+        "  name TEXT NOT NULL,"
+        "  length_bars INTEGER NOT NULL DEFAULT 4,"
+        "  order_index INTEGER NOT NULL DEFAULT 0,"
         "  FOREIGN KEY(song_id) REFERENCES songs(id) ON DELETE CASCADE"
         ");"
     );
@@ -159,7 +199,7 @@ Song DatabaseService::saveSong(Song song) {
     try {
         if (!song.id.has_value()) {
             sqlite3_stmt* stmt = nullptr;
-            const char* sql = "INSERT INTO songs (title, artist, tempo, key, notes, time_signature) VALUES (?, ?, ?, ?, ?, ?);";
+            const char* sql = "INSERT INTO songs (title, artist, tempo, key, notes, time_signature, click_eighths, click_sixteenths, click_eighths_gain, click_sixteenths_gain) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
             if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
                 throw std::runtime_error("Prepare failed for INSERT INTO songs");
 
@@ -169,6 +209,10 @@ Song DatabaseService::saveSong(Song song) {
             sqlite3_bind_text(stmt, 4, song.key.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 5, song.notes.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 6, song.timeSignature.empty() ? "4/4" : song.timeSignature.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 7, song.clickEighths ? 1 : 0);
+            sqlite3_bind_int(stmt, 8, song.clickSixteenths ? 1 : 0);
+            sqlite3_bind_double(stmt, 9, static_cast<double>(song.clickEighthsGain));
+            sqlite3_bind_double(stmt, 10, static_cast<double>(song.clickSixteenthsGain));
 
             if (sqlite3_step(stmt) != SQLITE_DONE) {
                 sqlite3_finalize(stmt);
@@ -178,7 +222,7 @@ Song DatabaseService::saveSong(Song song) {
             song.id = sqlite3_last_insert_rowid(db_);
         } else {
             sqlite3_stmt* stmt = nullptr;
-            const char* sql = "UPDATE songs SET title = ?, artist = ?, tempo = ?, key = ?, notes = ?, time_signature = ? WHERE id = ?;";
+            const char* sql = "UPDATE songs SET title = ?, artist = ?, tempo = ?, key = ?, notes = ?, time_signature = ?, click_eighths = ?, click_sixteenths = ?, click_eighths_gain = ?, click_sixteenths_gain = ? WHERE id = ?;";
             if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
                 throw std::runtime_error("Prepare failed for UPDATE songs");
 
@@ -188,7 +232,11 @@ Song DatabaseService::saveSong(Song song) {
             sqlite3_bind_text(stmt, 4, song.key.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 5, song.notes.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 6, song.timeSignature.empty() ? "4/4" : song.timeSignature.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(stmt, 7, *song.id);
+            sqlite3_bind_int(stmt, 7, song.clickEighths ? 1 : 0);
+            sqlite3_bind_int(stmt, 8, song.clickSixteenths ? 1 : 0);
+            sqlite3_bind_double(stmt, 9, static_cast<double>(song.clickEighthsGain));
+            sqlite3_bind_double(stmt, 10, static_cast<double>(song.clickSixteenthsGain));
+            sqlite3_bind_int64(stmt, 11, *song.id);
 
             if (sqlite3_step(stmt) != SQLITE_DONE) {
                 sqlite3_finalize(stmt);
@@ -203,11 +251,19 @@ Song DatabaseService::saveSong(Song song) {
                 sqlite3_step(delStmt);
                 sqlite3_finalize(delStmt);
             }
+
+            // Recreate sections
+            sqlite3_stmt* delSecStmt = nullptr;
+            if (sqlite3_prepare_v2(db_, "DELETE FROM song_sections WHERE song_id = ?;", -1, &delSecStmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(delSecStmt, 1, *song.id);
+                sqlite3_step(delSecStmt);
+                sqlite3_finalize(delSecStmt);
+            }
         }
 
         // Insert tracks
         sqlite3_stmt* trackStmt = nullptr;
-        const char* insertTrackSql = "INSERT INTO tracks (song_id, name, file_path, output_channel, gain, muted) VALUES (?, ?, ?, ?, ?, ?);";
+        const char* insertTrackSql = "INSERT INTO tracks (song_id, name, file_path, output_channel, gain, muted, track_key, num_channels, stereo_output) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
         if (sqlite3_prepare_v2(db_, insertTrackSql, -1, &trackStmt, nullptr) != SQLITE_OK)
             throw std::runtime_error("Prepare failed for INSERT INTO tracks");
 
@@ -219,12 +275,36 @@ Song DatabaseService::saveSong(Song song) {
             sqlite3_bind_int(trackStmt, 4, track.outputChannel);
             sqlite3_bind_double(trackStmt, 5, static_cast<double>(track.gain));
             sqlite3_bind_int(trackStmt, 6, track.muted ? 1 : 0);
+            sqlite3_bind_text(trackStmt, 7, track.trackKey.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(trackStmt, 8, track.numChannels);
+            sqlite3_bind_int(trackStmt, 9, track.stereoOutput ? 1 : 0);
 
             if (sqlite3_step(trackStmt) == SQLITE_DONE) {
                 track.id = sqlite3_last_insert_rowid(db_);
             }
         }
         sqlite3_finalize(trackStmt);
+
+        // Insert sections
+        sqlite3_stmt* secStmt = nullptr;
+        const char* insertSecSql = "INSERT INTO song_sections (song_id, name, length_bars, order_index) VALUES (?, ?, ?, ?);";
+        if (sqlite3_prepare_v2(db_, insertSecSql, -1, &secStmt, nullptr) != SQLITE_OK)
+            throw std::runtime_error("Prepare failed for INSERT INTO song_sections");
+
+        for (size_t i = 0; i < song.sections.size(); ++i) {
+            auto& sec = song.sections[i];
+            sec.orderIndex = static_cast<int>(i);
+            sqlite3_reset(secStmt);
+            sqlite3_bind_int64(secStmt, 1, *song.id);
+            sqlite3_bind_text(secStmt, 2, sec.name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(secStmt, 3, std::max(1, sec.lengthBars));
+            sqlite3_bind_int(secStmt, 4, sec.orderIndex);
+
+            if (sqlite3_step(secStmt) == SQLITE_DONE) {
+                sec.id = sqlite3_last_insert_rowid(db_);
+            }
+        }
+        sqlite3_finalize(secStmt);
 
         executeSimple("COMMIT;");
     } catch (...) {
@@ -239,7 +319,7 @@ std::vector<SongTrack> DatabaseService::listTracksForSong(int64_t songId) {
     std::lock_guard<std::mutex> lock(dbMutex_);
     std::vector<SongTrack> tracks;
 
-    const char* sql = "SELECT id, name, file_path, output_channel, gain, muted FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
+    const char* sql = "SELECT id, name, file_path, output_channel, gain, muted, track_key, num_channels, stereo_output FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return tracks;
@@ -255,17 +335,92 @@ std::vector<SongTrack> DatabaseService::listTracksForSong(int64_t songId) {
         t.outputChannel = sqlite3_column_int(stmt, 3);
         t.gain = static_cast<float>(sqlite3_column_double(stmt, 4));
         t.muted = sqlite3_column_int(stmt, 5) != 0;
+        const unsigned char* tk = sqlite3_column_text(stmt, 6);
+        t.trackKey = tk ? reinterpret_cast<const char*>(tk) : "";
+        t.numChannels = sqlite3_column_int(stmt, 7);
+        t.stereoOutput = sqlite3_column_int(stmt, 8) != 0;
         tracks.push_back(t);
     }
     sqlite3_finalize(stmt);
     return tracks;
 }
 
+void DatabaseService::updateTrackMix(int64_t trackId, float gain, int outputChannel, bool stereoOutput) {
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    const char* sql = "UPDATE tracks SET gain = ?, output_channel = ?, stereo_output = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_double(stmt, 1, static_cast<double>(gain));
+        sqlite3_bind_int(stmt, 2, outputChannel);
+        sqlite3_bind_int(stmt, 3, stereoOutput ? 1 : 0);
+        sqlite3_bind_int64(stmt, 4, trackId);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+void DatabaseService::updateSongClickSubdivisions(int64_t songId,
+                                                  bool clickEighths,
+                                                  bool clickSixteenths,
+                                                  float clickEighthsGain,
+                                                  float clickSixteenthsGain) {
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    const char* sql = "UPDATE songs SET click_eighths = ?, click_sixteenths = ?, click_eighths_gain = ?, click_sixteenths_gain = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, clickEighths ? 1 : 0);
+        sqlite3_bind_int(stmt, 2, clickSixteenths ? 1 : 0);
+        sqlite3_bind_double(stmt, 3, static_cast<double>(clickEighthsGain));
+        sqlite3_bind_double(stmt, 4, static_cast<double>(clickSixteenthsGain));
+        sqlite3_bind_int64(stmt, 5, songId);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+void DatabaseService::saveSongSections(int64_t songId, std::vector<SongSection>& sections) {
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    executeSimple("BEGIN TRANSACTION;");
+    try {
+        sqlite3_stmt* delStmt = nullptr;
+        if (sqlite3_prepare_v2(db_, "DELETE FROM song_sections WHERE song_id = ?;", -1, &delStmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(delStmt, 1, songId);
+            sqlite3_step(delStmt);
+            sqlite3_finalize(delStmt);
+        }
+
+        sqlite3_stmt* secStmt = nullptr;
+        const char* insertSecSql = "INSERT INTO song_sections (song_id, name, length_bars, order_index) VALUES (?, ?, ?, ?);";
+        if (sqlite3_prepare_v2(db_, insertSecSql, -1, &secStmt, nullptr) != SQLITE_OK)
+            throw std::runtime_error("Prepare failed for INSERT INTO song_sections");
+
+        for (size_t i = 0; i < sections.size(); ++i) {
+            auto& sec = sections[i];
+            sec.orderIndex = static_cast<int>(i);
+            sqlite3_reset(secStmt);
+            sqlite3_bind_int64(secStmt, 1, songId);
+            sqlite3_bind_text(secStmt, 2, sec.name.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(secStmt, 3, std::max(1, sec.lengthBars));
+            sqlite3_bind_int(secStmt, 4, sec.orderIndex);
+
+            if (sqlite3_step(secStmt) == SQLITE_DONE) {
+                sec.id = sqlite3_last_insert_rowid(db_);
+            }
+        }
+        sqlite3_finalize(secStmt);
+
+        executeSimple("COMMIT;");
+    } catch (...) {
+        executeSimple("ROLLBACK;");
+        throw;
+    }
+}
+
 std::vector<Song> DatabaseService::listSongs() {
     std::lock_guard<std::mutex> lock(dbMutex_);
     std::vector<Song> songs;
 
-    const char* sql = "SELECT id, title, artist, tempo, key, notes, time_signature FROM songs ORDER BY title ASC;";
+    const char* sql = "SELECT id, title, artist, tempo, key, notes, time_signature, click_eighths, click_sixteenths, click_eighths_gain, click_sixteenths_gain FROM songs ORDER BY title ASC;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return songs;
@@ -284,6 +439,10 @@ std::vector<Song> DatabaseService::listSongs() {
         s.notes = notes ? reinterpret_cast<const char*>(notes) : "";
         const unsigned char* sig = sqlite3_column_text(stmt, 6);
         s.timeSignature = sig ? reinterpret_cast<const char*>(sig) : "4/4";
+        s.clickEighths = sqlite3_column_int(stmt, 7) != 0;
+        s.clickSixteenths = sqlite3_column_int(stmt, 8) != 0;
+        s.clickEighthsGain = static_cast<float>(sqlite3_column_double(stmt, 9));
+        s.clickSixteenthsGain = static_cast<float>(sqlite3_column_double(stmt, 10));
         songs.push_back(s);
     }
     sqlite3_finalize(stmt);
@@ -291,7 +450,7 @@ std::vector<Song> DatabaseService::listSongs() {
     // Fetch tracks for each song
     for (auto& s : songs) {
         if (s.id.has_value()) {
-            const char* trackSql = "SELECT id, name, file_path, output_channel, gain, muted FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
+            const char* trackSql = "SELECT id, name, file_path, output_channel, gain, muted, track_key, num_channels, stereo_output FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
             sqlite3_stmt* tStmt = nullptr;
             if (sqlite3_prepare_v2(db_, trackSql, -1, &tStmt, nullptr) == SQLITE_OK) {
                 sqlite3_bind_int64(tStmt, 1, *s.id);
@@ -305,9 +464,29 @@ std::vector<Song> DatabaseService::listSongs() {
                     t.outputChannel = sqlite3_column_int(tStmt, 3);
                     t.gain = static_cast<float>(sqlite3_column_double(tStmt, 4));
                     t.muted = sqlite3_column_int(tStmt, 5) != 0;
+                    const unsigned char* tk = sqlite3_column_text(tStmt, 6);
+                    t.trackKey = tk ? reinterpret_cast<const char*>(tk) : "";
+                    t.numChannels = sqlite3_column_int(tStmt, 7);
+                    t.stereoOutput = sqlite3_column_int(tStmt, 8) != 0;
                     s.tracks.push_back(t);
                 }
                 sqlite3_finalize(tStmt);
+            }
+
+            const char* secSql = "SELECT id, name, length_bars, order_index FROM song_sections WHERE song_id = ? ORDER BY order_index ASC, id ASC;";
+            sqlite3_stmt* sStmt = nullptr;
+            if (sqlite3_prepare_v2(db_, secSql, -1, &sStmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(sStmt, 1, *s.id);
+                while (sqlite3_step(sStmt) == SQLITE_ROW) {
+                    SongSection sec;
+                    sec.id = sqlite3_column_int64(sStmt, 0);
+                    const unsigned char* name = sqlite3_column_text(sStmt, 1);
+                    sec.name = name ? reinterpret_cast<const char*>(name) : "";
+                    sec.lengthBars = std::max(1, sqlite3_column_int(sStmt, 2));
+                    sec.orderIndex = sqlite3_column_int(sStmt, 3);
+                    s.sections.push_back(sec);
+                }
+                sqlite3_finalize(sStmt);
             }
         }
     }
@@ -317,7 +496,7 @@ std::vector<Song> DatabaseService::listSongs() {
 
 std::optional<Song> DatabaseService::loadSong(int64_t songId) {
     std::lock_guard<std::mutex> lock(dbMutex_);
-    const char* sql = "SELECT id, title, artist, tempo, key, notes, time_signature FROM songs WHERE id = ?;";
+    const char* sql = "SELECT id, title, artist, tempo, key, notes, time_signature, click_eighths, click_sixteenths, click_eighths_gain, click_sixteenths_gain FROM songs WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK)
         return std::nullopt;
@@ -341,10 +520,14 @@ std::optional<Song> DatabaseService::loadSong(int64_t songId) {
     s.notes = notes ? reinterpret_cast<const char*>(notes) : "";
     const unsigned char* sig = sqlite3_column_text(stmt, 6);
     s.timeSignature = sig ? reinterpret_cast<const char*>(sig) : "4/4";
+    s.clickEighths = sqlite3_column_int(stmt, 7) != 0;
+    s.clickSixteenths = sqlite3_column_int(stmt, 8) != 0;
+    s.clickEighthsGain = static_cast<float>(sqlite3_column_double(stmt, 9));
+    s.clickSixteenthsGain = static_cast<float>(sqlite3_column_double(stmt, 10));
     sqlite3_finalize(stmt);
 
     // Fetch tracks
-    const char* trackSql = "SELECT id, name, file_path, output_channel, gain, muted FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
+    const char* trackSql = "SELECT id, name, file_path, output_channel, gain, muted, track_key, num_channels, stereo_output FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
     sqlite3_stmt* tStmt = nullptr;
     if (sqlite3_prepare_v2(db_, trackSql, -1, &tStmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_int64(tStmt, 1, songId);
@@ -358,9 +541,30 @@ std::optional<Song> DatabaseService::loadSong(int64_t songId) {
             t.outputChannel = sqlite3_column_int(tStmt, 3);
             t.gain = static_cast<float>(sqlite3_column_double(tStmt, 4));
             t.muted = sqlite3_column_int(tStmt, 5) != 0;
+            const unsigned char* tk = sqlite3_column_text(tStmt, 6);
+            t.trackKey = tk ? reinterpret_cast<const char*>(tk) : "";
+            t.numChannels = sqlite3_column_int(tStmt, 7);
+            t.stereoOutput = sqlite3_column_int(tStmt, 8) != 0;
             s.tracks.push_back(t);
         }
         sqlite3_finalize(tStmt);
+    }
+
+    // Fetch sections
+    const char* secSql = "SELECT id, name, length_bars, order_index FROM song_sections WHERE song_id = ? ORDER BY order_index ASC, id ASC;";
+    sqlite3_stmt* sStmt = nullptr;
+    if (sqlite3_prepare_v2(db_, secSql, -1, &sStmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(sStmt, 1, songId);
+        while (sqlite3_step(sStmt) == SQLITE_ROW) {
+            SongSection sec;
+            sec.id = sqlite3_column_int64(sStmt, 0);
+            const unsigned char* name = sqlite3_column_text(sStmt, 1);
+            sec.name = name ? reinterpret_cast<const char*>(name) : "";
+            sec.lengthBars = std::max(1, sqlite3_column_int(sStmt, 2));
+            sec.orderIndex = sqlite3_column_int(sStmt, 3);
+            s.sections.push_back(sec);
+        }
+        sqlite3_finalize(sStmt);
     }
 
     return s;

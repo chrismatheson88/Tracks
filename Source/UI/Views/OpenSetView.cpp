@@ -15,14 +15,44 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     setSelectLabel_.setColour(juce::Label::textColourId, AppTheme::textLight);
     addAndMakeVisible(setSelectLabel_);
 
+    setPicker_.setEditableText(true);
     setPicker_.onChange = [this]() {
         int idx = setPicker_.getSelectedItemIndex();
         if (idx >= 0 && idx < static_cast<int>(setlists_.size())) {
-            currentSetlist_ = setlists_[static_cast<size_t>(idx)];
-            loadSetlistToUI(*currentSetlist_);
+            if (setlists_[static_cast<size_t>(idx)].id.has_value()) {
+                selectSetlist(*setlists_[static_cast<size_t>(idx)].id);
+            } else {
+                currentSetlist_ = setlists_[static_cast<size_t>(idx)];
+                loadSetlistToUI(*currentSetlist_);
+            }
+        } else if (currentSetlist_.has_value()) {
+            saveCurrentSetlist();
         }
     };
     addAndMakeVisible(setPicker_);
+
+    auto setupTopBarDateTime = [this](juce::Label& lbl, juce::TextEditor& ed, const juce::String& placeholder) {
+        lbl.setFont(juce::Font(12.0f, juce::Font::bold));
+        lbl.setColour(juce::Label::textColourId, AppTheme::textLight);
+        lbl.setJustificationType(juce::Justification::centredRight);
+        addAndMakeVisible(lbl);
+
+        ed.setJustification(juce::Justification::centredLeft);
+        ed.setTextToShowWhenEmpty(placeholder, AppTheme::textMuted.withAlpha(0.5f));
+        ed.onTextChange = [this]() { saveCurrentSetlist(); };
+        addAndMakeVisible(ed);
+    };
+
+    setupTopBarDateTime(dateLabel_, dateEditor_, "YYYY-MM-DD");
+    setupTopBarDateTime(timeLabel_, timeEditor_, "HH:MM AM");
+
+    datePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
+    datePickerButton_.onClick = [this]() { showCalendarPopup(); };
+    addAndMakeVisible(datePickerButton_);
+
+    timePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
+    timePickerButton_.onClick = [this]() { showTimePopup(); };
+    addAndMakeVisible(timePickerButton_);
 
     newSetButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
     newSetButton_.onClick = [this]() {
@@ -49,30 +79,9 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     };
     addAndMakeVisible(deleteSetButton_);
 
-    // Metadata
-    auto setupMeta = [this](juce::Label& lbl, juce::TextEditor& ed) {
-        lbl.setFont(juce::Font(11.0f, juce::Font::bold));
-        lbl.setColour(juce::Label::textColourId, AppTheme::textMuted);
-        addAndMakeVisible(lbl);
-        addAndMakeVisible(ed);
-    };
-
-    setupMeta(nameLabel_, nameEditor_);
-    setupMeta(dateLabel_, dateEditor_);
-    setupMeta(timeLabel_, timeEditor_);
-    setupMeta(notesLabel_, notesEditor_);
-
-    datePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
-    datePickerButton_.onClick = [this]() { showCalendarPopup(); };
-    addAndMakeVisible(datePickerButton_);
-
-    timePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
-    timePickerButton_.onClick = [this]() { showTimePopup(); };
-    addAndMakeVisible(timePickerButton_);
-
     // Set entries listbox
     entryListBox_.setModel(this);
-    entryListBox_.setRowHeight(36);
+    entryListBox_.setRowHeight(40);
     addAndMakeVisible(entryListBox_);
 
     // Reorder & remove buttons
@@ -120,20 +129,32 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     };
     addAndMakeVisible(removeSongButton_);
 
-    // Add Song dropdown
-    addAndMakeVisible(addSongPicker_);
-    addSongButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
-    addSongButton_.onClick = [this]() {
-        if (!currentSetlist_) return;
+    // Add Song dropdown (adds immediately on selection)
+    addSongPicker_.setTextWhenNothingSelected("Add song to set...");
+    addSongPicker_.setTextWhenNoChoicesAvailable("No songs in library");
+    addSongPicker_.onChange = [this]() {
         int songId = addSongPicker_.getSelectedId();
-        if (songId > 0) {
-            currentSetlist_->addSong(songId);
-            saveCurrentSetlist();
-            entryListBox_.updateContent();
-            entryListBox_.selectRow(static_cast<int>(currentSetlist_->entries.size()) - 1);
-        }
+        if (songId <= 0) return;
+
+        addSongPicker_.setSelectedId(0, juce::dontSendNotification);
+
+        if (!currentSetlist_) return;
+
+        auto songOpt = db_.loadSong(songId);
+        if (!songOpt.has_value()) return;
+
+        SetlistEntry entry;
+        entry.songId = songId;
+        entry.orderIndex = static_cast<int>(currentSetlist_->entries.size());
+        entry.song = *songOpt;
+        currentSetlist_->entries.push_back(entry);
+
+        saveCurrentSetlist();
+        preloadCurrentSetlist();
+        entryListBox_.updateContent();
+        entryListBox_.selectRow(static_cast<int>(currentSetlist_->entries.size()) - 1);
     };
-    addAndMakeVisible(addSongButton_);
+    addAndMakeVisible(addSongPicker_);
 
     // Overrides section
     overridesHeader_.setFont(juce::Font(14.0f, juce::Font::bold));
@@ -143,10 +164,13 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     auto setupOverride = [this](juce::Label& lbl) {
         lbl.setFont(juce::Font(11.0f, juce::Font::bold));
         lbl.setColour(juce::Label::textColourId, AppTheme::textMuted);
+        lbl.setJustificationType(juce::Justification::centredRight);
         addAndMakeVisible(lbl);
     };
 
     setupOverride(overrideTempoLabel_);
+    overrideTempoLabel_.setJustificationType(juce::Justification::centredLeft);
+    overrideTempoEditor_.setJustification(juce::Justification::centredLeft);
     addAndMakeVisible(overrideTempoEditor_);
     overrideTempoEditor_.onTextChange = [this]() { applyOverridesFromUI(); };
 
@@ -173,47 +197,77 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     saveOverrideToLibraryButton_.onClick = [this]() { saveOverridesToMasterSong(); };
     addAndMakeVisible(saveOverrideToLibraryButton_);
 
-    saveSetButton_.setColour(juce::TextButton::buttonColourId, AppTheme::accentGreen);
-    saveSetButton_.onClick = [this]() { saveCurrentSetlist(); };
-    addAndMakeVisible(saveSetButton_);
-
     refreshSetlists();
 }
 
 void OpenSetView::populateAddSongPicker() {
-    addSongPicker_.clear();
+    addSongPicker_.clear(juce::dontSendNotification);
     auto allSongs = db_.listSongs();
     for (const auto& song : allSongs) {
         if (song.id.has_value()) {
-            addSongPicker_.addItem(song.title + " (" + song.artist + ")", static_cast<int>(*song.id));
+            juce::String label = song.title;
+            if (!song.artist.empty()) {
+                label += " (" + juce::String(song.artist) + ")";
+            }
+            addSongPicker_.addItem(label, static_cast<int>(*song.id));
         }
     }
-    if (addSongPicker_.getNumItems() > 0) {
-        addSongPicker_.setSelectedId(1, juce::dontSendNotification);
+    addSongPicker_.setSelectedId(0, juce::dontSendNotification);
+}
+
+void OpenSetView::preloadCurrentSetlist() {
+    if (!isVisible() || !currentSetlist_ || !currentSetlist_->id.has_value()) return;
+
+    std::vector<Song> songsInSet;
+    songsInSet.reserve(currentSetlist_->entries.size());
+    for (const auto& entry : currentSetlist_->entries) {
+        if (entry.song.has_value()) {
+            songsInSet.push_back(*entry.song);
+        }
     }
+    audioEngine_.preloadSetlist(*currentSetlist_->id, songsInSet);
 }
 
 void OpenSetView::refreshSetlists() {
     setlists_ = db_.listSetlists();
-    setPicker_.clear();
+    setPicker_.clear(juce::dontSendNotification);
     for (size_t i = 0; i < setlists_.size(); ++i) {
         setPicker_.addItem(setlists_[i].name, static_cast<int>(i + 1));
     }
+    setPicker_.setEditableText(!setlists_.empty());
+    addSongPicker_.setEnabled(!setlists_.empty());
 
     populateAddSongPicker();
 
     if (!setlists_.empty()) {
-        if (!currentSetlist_ || !currentSetlist_->id.has_value()) {
-            selectSetlist(*setlists_[0].id);
+        if (currentSetlist_ && currentSetlist_->id.has_value()) {
+            const int64_t currentId = *currentSetlist_->id;
+            bool stillExists = false;
+            for (size_t i = 0; i < setlists_.size(); ++i) {
+                if (setlists_[i].id.has_value() && *setlists_[i].id == currentId) {
+                    setPicker_.setSelectedId(static_cast<int>(i + 1), juce::dontSendNotification);
+                    auto loaded = db_.loadSetlist(currentId);
+                    if (loaded.has_value()) {
+                        currentSetlist_ = loaded;
+                        loadSetlistToUI(*currentSetlist_, true);
+                        preloadCurrentSetlist();
+                    }
+                    stillExists = true;
+                    break;
+                }
+            }
+            if (!stillExists) {
+                selectSetlist(*setlists_[0].id);
+            }
         } else {
-            selectSetlist(*currentSetlist_->id);
+            selectSetlist(*setlists_[0].id);
         }
     } else {
         currentSetlist_ = std::nullopt;
-        nameEditor_.setText("", false);
+        selectedEntryIndex_ = -1;
+        setPicker_.setText("", juce::dontSendNotification);
         dateEditor_.setText("", false);
         timeEditor_.setText("", false);
-        notesEditor_.setText("", false);
         entryListBox_.updateContent();
         updateOverridesUI();
     }
@@ -226,21 +280,37 @@ void OpenSetView::selectSetlist(int64_t setId) {
             auto loaded = db_.loadSetlist(setId);
             if (loaded.has_value()) {
                 currentSetlist_ = loaded;
-                loadSetlistToUI(*currentSetlist_);
+                loadSetlistToUI(*currentSetlist_, false);
+                preloadCurrentSetlist();
             }
             break;
         }
     }
 }
 
-void OpenSetView::loadSetlistToUI(const Setlist& setlist) {
-    nameEditor_.setText(setlist.name, false);
+void OpenSetView::loadSetlistToUI(const Setlist& setlist, bool preserveSelection) {
     dateEditor_.setText(setlist.setDate, false);
     timeEditor_.setText(setlist.setTime, false);
-    notesEditor_.setText(setlist.notes, false);
 
-    selectedEntryIndex_ = -1;
+    if (!preserveSelection || selectedEntryIndex_ >= static_cast<int>(setlist.entries.size())) {
+        selectedEntryIndex_ = -1;
+    }
     entryListBox_.updateContent();
+    if (selectedEntryIndex_ >= 0) {
+        entryListBox_.selectRow(selectedEntryIndex_, false, false);
+        if (preserveSelection && selectedEntryIndex_ < static_cast<int>(setlist.entries.size())) {
+            const auto& entry = setlist.entries[static_cast<size_t>(selectedEntryIndex_)];
+            if (entry.song.has_value() && onSongSelectedForPlayback) {
+                Song effectiveSong = *entry.song;
+                effectiveSong.tempo = entry.getEffectiveTempo();
+                effectiveSong.key = entry.getEffectiveKey();
+                effectiveSong.timeSignature = entry.getEffectiveTimeSignature();
+                onSongSelectedForPlayback(effectiveSong);
+            }
+        }
+    } else {
+        entryListBox_.deselectAllRows();
+    }
     entryListBox_.repaint();
     updateOverridesUI();
 }
@@ -248,17 +318,28 @@ void OpenSetView::loadSetlistToUI(const Setlist& setlist) {
 void OpenSetView::saveCurrentSetlist() {
     if (!currentSetlist_) return;
 
-    currentSetlist_->name = nameEditor_.getText().trim().toStdString();
+    currentSetlist_->name = setPicker_.getText().trim().toStdString();
     if (currentSetlist_->name.empty()) currentSetlist_->name = "Untitled Set";
     currentSetlist_->setDate = dateEditor_.getText().toStdString();
     currentSetlist_->setTime = timeEditor_.getText().toStdString();
-    currentSetlist_->notes = notesEditor_.getText().toStdString();
 
     Setlist saved = db_.saveSetlist(*currentSetlist_);
     currentSetlist_ = saved;
 
-    int curIdx = setPicker_.getSelectedItemIndex();
-    setPicker_.changeItemText(curIdx + 1, saved.name);
+    if (saved.id.has_value()) {
+        for (size_t i = 0; i < setlists_.size(); ++i) {
+            if (setlists_[i].id.has_value() && *setlists_[i].id == *saved.id) {
+                setlists_[i] = saved;
+                int itemId = static_cast<int>(i + 1);
+                if (setPicker_.getItemText(static_cast<int>(i)).toStdString() != saved.name ||
+                    setPicker_.getSelectedId() != itemId) {
+                    setPicker_.changeItemText(itemId, saved.name);
+                    setPicker_.setSelectedId(itemId, juce::dontSendNotification);
+                }
+                break;
+            }
+        }
+    }
 }
 
 int OpenSetView::getNumRows() {
@@ -286,27 +367,36 @@ void OpenSetView::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, 
     // Order number
     g.setFont(juce::Font(12.0f, juce::Font::bold));
     g.setColour(AppTheme::primaryBlue);
-    g.drawText(juce::String(rowNumber + 1) + ".", 8, 0, 24, height, juce::Justification::centredLeft);
+    g.drawText(juce::String(rowNumber + 1) + ".", 6, 0, 22, height, juce::Justification::centredLeft);
 
-    // Title & Artist
+    const int contentX = 28;
+    const int contentW = std::max(0, width - contentX - 8);
+
+    // Title (full top row)
     g.setFont(juce::Font(13.0f, juce::Font::bold));
     g.setColour(AppTheme::textLight);
-    g.drawText(songTitle, 36, 4, width - 200, 16, juce::Justification::centredLeft, true);
+    g.drawText(songTitle, contentX, 4, contentW, 16, juce::Justification::centredLeft, true);
 
-    g.setFont(juce::Font(11.0f, juce::Font::plain));
-    g.setColour(AppTheme::textMuted);
-    g.drawText(songArtist, 36, 20, width - 200, 14, juce::Justification::centredLeft, true);
-
-    // Effective settings badge
-    juce::String details = juce::String(effTempo) + " BPM  |  " + juce::String(effKey) + "  |  " + juce::String(effTimeSig);
+    // Effective settings badge (bottom right)
+    juce::String details = juce::String(effTempo) + " BPM | " + juce::String(effKey) + " | " + juce::String(effTimeSig);
     if (entry.overrideTempo.has_value() || entry.overrideKey.has_value() || entry.overrideTimeSignature.has_value()) {
-        details += " (Custom)";
+        details += " *";
         g.setColour(AppTheme::warningAmber);
     } else {
         g.setColour(AppTheme::textMuted);
     }
-    g.setFont(juce::Font(11.0f, juce::Font::bold));
-    g.drawText(details, width - 200, 0, 190, height, juce::Justification::centredRight, true);
+    juce::Font detailsFont(10.5f, juce::Font::bold);
+    g.setFont(detailsFont);
+    const int detailsW = std::min(contentW, detailsFont.getStringWidth(details) + 4);
+    g.drawText(details, contentX + contentW - detailsW, 21, detailsW, 15, juce::Justification::centredRight, true);
+
+    // Artist (bottom left, remaining space)
+    const int artistW = contentW - detailsW - 6;
+    if (artistW > 24 && !songArtist.empty()) {
+        g.setFont(juce::Font(11.0f, juce::Font::plain));
+        g.setColour(AppTheme::textMuted);
+        g.drawText(songArtist, contentX, 21, artistW, 15, juce::Justification::centredLeft, true);
+    }
 
     g.setColour(AppTheme::borderCol);
     g.drawHorizontalLine(height - 1, 0.0f, static_cast<float>(width));
@@ -408,6 +498,22 @@ void OpenSetView::applyOverridesFromUI() {
     }
 }
 
+void OpenSetView::syncSongClickSubdivisions(int64_t songId,
+                                            bool clickEighths,
+                                            bool clickSixteenths,
+                                            float clickEighthsGain,
+                                            float clickSixteenthsGain) {
+    if (!currentSetlist_) return;
+    for (auto& entry : currentSetlist_->entries) {
+        if (entry.songId == songId && entry.song.has_value()) {
+            entry.song->clickEighths = clickEighths;
+            entry.song->clickSixteenths = clickSixteenths;
+            entry.song->clickEighthsGain = clickEighthsGain;
+            entry.song->clickSixteenthsGain = clickSixteenthsGain;
+        }
+    }
+}
+
 void OpenSetView::saveOverridesToMasterSong() {
     if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
         selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size()))
@@ -433,105 +539,88 @@ void OpenSetView::saveOverridesToMasterSong() {
 void OpenSetView::paint(juce::Graphics& g) {
     g.fillAll(AppTheme::bgDark);
     g.setColour(AppTheme::borderCol);
-    g.drawVerticalLine(getWidth() - 320, 56.0f, static_cast<float>(getHeight()));
+    const int setlistWidth = getWidth() / 4;
+    g.drawVerticalLine(16 + setlistWidth + 10, 56.0f, static_cast<float>(getHeight()));
 }
 
 void OpenSetView::resized() {
     auto area = getLocalBounds().reduced(16);
 
-    // Top Bar: Set Picker + New/Delete
+    // Top Bar: Set Picker + Date + Time + New/Delete
     auto topBar = area.removeFromTop(32);
-    setSelectLabel_.setBounds(topBar.removeFromLeft(60));
-    setPicker_.setBounds(topBar.removeFromLeft(220));
+
+    deleteSetButton_.setBounds(topBar.removeFromRight(96));
+    topBar.removeFromRight(8);
+    newSetButton_.setBounds(topBar.removeFromRight(90));
+    topBar.removeFromRight(12);
+
+    setSelectLabel_.setBounds(topBar.removeFromLeft(58));
+    setPicker_.setBounds(topBar.removeFromLeft(200));
     topBar.removeFromLeft(12);
-    newSetButton_.setBounds(topBar.removeFromLeft(110));
-    topBar.removeFromLeft(8);
-    deleteSetButton_.setBounds(topBar.removeFromLeft(100));
+
+    dateLabel_.setBounds(topBar.removeFromLeft(44));
+    dateEditor_.setBounds(topBar.removeFromLeft(104));
+    topBar.removeFromLeft(4);
+    datePickerButton_.setBounds(topBar.removeFromLeft(44));
+    topBar.removeFromLeft(12);
+
+    timeLabel_.setBounds(topBar.removeFromLeft(44));
+    timeEditor_.setBounds(topBar.removeFromLeft(88));
+    topBar.removeFromLeft(4);
+    timePickerButton_.setBounds(topBar.removeFromLeft(44));
 
     area.removeFromTop(16);
 
-    // Right Column: Set Details & Overrides (300px)
-    auto rightCol = area.removeFromRight(300);
-    area.removeFromRight(20);
-
-    // Right Column contents
-    auto metaHeader = rightCol.removeFromTop(20);
-    juce::Label lbl({}, "Setlist Details");
-    lbl.setFont(juce::Font(14.0f, juce::Font::bold));
-    lbl.setColour(juce::Label::textColourId, AppTheme::textLight);
-
-    int rowH = 26;
-    int gap = 6;
-
-    auto r1 = rightCol.removeFromTop(rowH);
-    nameLabel_.setBounds(r1.removeFromLeft(50));
-    nameEditor_.setBounds(r1);
-
-    rightCol.removeFromTop(gap);
-    auto r2 = rightCol.removeFromTop(rowH);
-    dateLabel_.setBounds(r2.removeFromLeft(50));
-    dateEditor_.setBounds(r2.removeFromLeft(130));
-    r2.removeFromLeft(6);
-    datePickerButton_.setBounds(r2.removeFromLeft(45));
-
-    rightCol.removeFromTop(gap);
-    auto r3 = rightCol.removeFromTop(rowH);
-    timeLabel_.setBounds(r3.removeFromLeft(50));
-    timeEditor_.setBounds(r3.removeFromLeft(130));
-    r3.removeFromLeft(6);
-    timePickerButton_.setBounds(r3.removeFromLeft(45));
-
-    rightCol.removeFromTop(gap);
-    auto r4 = rightCol.removeFromTop(44);
-    notesLabel_.setBounds(r4.removeFromLeft(50));
-    notesEditor_.setBounds(r4);
-
-    rightCol.removeFromTop(gap);
-    saveSetButton_.setBounds(rightCol.removeFromTop(28));
-
-    rightCol.removeFromTop(20);
-    overridesHeader_.setBounds(rightCol.removeFromTop(24));
-    rightCol.removeFromTop(gap);
-
-    auto o1 = rightCol.removeFromTop(rowH);
-    overrideTempoLabel_.setBounds(o1.removeFromLeft(110));
-    overrideTempoEditor_.setBounds(o1);
-
-    rightCol.removeFromTop(gap);
-    auto o2 = rightCol.removeFromTop(rowH);
-    overrideKeyLabel_.setBounds(o2.removeFromLeft(110));
-    overrideKeyBox_.setBounds(o2);
-
-    rightCol.removeFromTop(gap);
-    auto o3 = rightCol.removeFromTop(rowH);
-    overrideTimeSigLabel_.setBounds(o3.removeFromLeft(110));
-    overrideTimeSigBox_.setBounds(o3);
-
-    rightCol.removeFromTop(12);
-    saveOverrideToLibraryButton_.setBounds(rightCol.removeFromTop(32));
-
-    // Left Area: Song list in set
-    auto leftArea = area;
+    // Left Area: Setlist (25% of window width)
+    const int setlistWidth = getWidth() / 4;
+    auto leftArea = area.removeFromLeft(setlistWidth);
+    area.removeFromLeft(20);
 
     // Controls below the setlist
-    auto bottomControls = leftArea.removeFromBottom(72);
+    auto bottomControls = leftArea.removeFromBottom(68);
 
-    auto addSongBar = bottomControls.removeFromTop(30);
-    addSongPicker_.setBounds(addSongBar.removeFromLeft(260));
-    addSongBar.removeFromLeft(8);
-    addSongButton_.setBounds(addSongBar.removeFromLeft(110));
+    auto addSongBar = bottomControls.removeFromTop(28);
+    addSongPicker_.setBounds(addSongBar);
 
-    bottomControls.removeFromTop(10);
+    bottomControls.removeFromTop(8);
 
-    auto actionButtons = bottomControls.removeFromTop(30);
-    moveUpButton_.setBounds(actionButtons.removeFromLeft(90));
-    actionButtons.removeFromLeft(8);
-    moveDownButton_.setBounds(actionButtons.removeFromLeft(100));
-    actionButtons.removeFromLeft(8);
-    removeSongButton_.setBounds(actionButtons.removeFromLeft(110));
+    auto actionButtons = bottomControls.removeFromTop(28);
+    const int btnGap = 6;
+    const int availW = std::max(0, actionButtons.getWidth() - btnGap * 2);
+    const int upW = static_cast<int>(availW * 0.31f);
+    const int downW = static_cast<int>(availW * 0.36f);
+    moveUpButton_.setBounds(actionButtons.removeFromLeft(upW));
+    actionButtons.removeFromLeft(btnGap);
+    moveDownButton_.setBounds(actionButtons.removeFromLeft(downW));
+    actionButtons.removeFromLeft(btnGap);
+    removeSongButton_.setBounds(actionButtons);
 
-    leftArea.removeFromBottom(12);
+    leftArea.removeFromBottom(10);
     entryListBox_.setBounds(leftArea);
+
+    // Right Area: Current Song settings laid out in a row
+    auto rightArea = area;
+
+    overridesHeader_.setBounds(rightArea.removeFromTop(24));
+    rightArea.removeFromTop(8);
+
+    auto settingsRow = rightArea.removeFromTop(28);
+    overrideTempoLabel_.setBounds(settingsRow.removeFromLeft(48));
+    overrideTempoEditor_.setBounds(settingsRow.removeFromLeft(64));
+    settingsRow.removeFromLeft(12);
+
+    overrideKeyLabel_.setBounds(settingsRow.removeFromLeft(36));
+    overrideKeyBox_.setBounds(settingsRow.removeFromLeft(96));
+    settingsRow.removeFromLeft(12);
+
+    overrideTimeSigLabel_.setBounds(settingsRow.removeFromLeft(102));
+    overrideTimeSigBox_.setBounds(settingsRow.removeFromLeft(96));
+    settingsRow.removeFromLeft(14);
+
+    saveOverrideToLibraryButton_.setBounds(settingsRow.removeFromLeft(84));
+
+    rightArea.removeFromTop(16);
+    transportArea_ = rightArea;
 }
 
 void OpenSetView::showCalendarPopup() {

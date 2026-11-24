@@ -1,6 +1,7 @@
 #include "AudioAttachmentService.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <algorithm>
+#include <cctype>
 #include <iomanip>
 #include <sstream>
 #include <set>
@@ -25,31 +26,76 @@ fs::path AudioAttachmentService::getProjectRoot() {
     return fs::current_path();
 }
 
-fs::path AudioAttachmentService::getSongStorageDir(int64_t songId) {
-    return getProjectRoot() / "uploaded_tracks" / std::to_string(songId);
+bool AudioAttachmentService::isSupportedAudioExtension(const std::string& extension) {
+    std::string ext = extension;
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext == ".wav" || ext == ".mp3" || ext == ".m4a";
 }
 
-fs::path AudioAttachmentService::getSongTracksDir(int64_t songId) {
-    return getSongStorageDir(songId) / "tracks";
+std::string AudioAttachmentService::sanitizeSongTitleForPath(const std::string& songTitle) {
+    std::string out;
+    out.reserve(songTitle.size());
+    bool lastWasUnderscore = false;
+
+    for (unsigned char ch : songTitle) {
+        if (std::isalnum(ch) || ch == '-') {
+            out.push_back(static_cast<char>(ch));
+            lastWasUnderscore = false;
+        } else if (ch == ' ' || ch == '_' || !std::isalnum(ch)) {
+            if (!out.empty() && !lastWasUnderscore) {
+                out.push_back('_');
+                lastWasUnderscore = true;
+            }
+        }
+    }
+
+    while (!out.empty() && out.back() == '_') {
+        out.pop_back();
+    }
+
+    return out;
+}
+
+fs::path AudioAttachmentService::getSongStorageDir(int64_t songId, const std::string& songTitle) {
+    std::string folderName = std::to_string(songId);
+    std::string safeTitle = sanitizeSongTitleForPath(songTitle);
+    if (!safeTitle.empty()) {
+        folderName += "_" + safeTitle;
+    }
+    return getProjectRoot() / "uploaded_tracks" / folderName;
+}
+
+fs::path AudioAttachmentService::getSongTracksDir(int64_t songId, const std::string& songTitle) {
+    return getSongStorageDir(songId, songTitle) / "tracks";
 }
 
 void AudioAttachmentService::removeSongStorage(int64_t songId) {
-    auto dir = getSongStorageDir(songId);
-    if (fs::exists(dir)) {
-        std::error_code ec;
-        fs::remove_all(dir, ec);
+    auto root = getProjectRoot() / "uploaded_tracks";
+    if (!fs::exists(root) || !fs::is_directory(root)) {
+        return;
+    }
+
+    const std::string exactName = std::to_string(songId);
+    const std::string prefix = exactName + "_";
+
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (!entry.is_directory()) continue;
+        std::string name = entry.path().filename().string();
+        if (name == exactName || name.rfind(prefix, 0) == 0) {
+            fs::remove_all(entry.path(), ec);
+        }
     }
 }
 
-void AudioAttachmentService::clearSongTrackDirectory(int64_t songId) {
-    auto dir = getSongTracksDir(songId);
+void AudioAttachmentService::clearSongTrackDirectory(int64_t songId, const std::string& songTitle) {
+    auto dir = getSongTracksDir(songId, songTitle);
     if (fs::exists(dir)) {
         std::error_code ec;
         for (const auto& entry : fs::directory_iterator(dir, ec)) {
             if (entry.is_regular_file()) {
-                auto ext = entry.path().extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                if (ext == ".wav" || ext == ".mp3") {
+                if (isSupportedAudioExtension(entry.path().extension().string())) {
                     fs::remove(entry.path(), ec);
                 }
             }
@@ -69,16 +115,14 @@ AudioDirectoryInspectionResult AudioAttachmentService::inspectAudioDirectory(con
     std::vector<fs::path> audioFiles;
     for (const auto& entry : fs::directory_iterator(dir)) {
         if (entry.is_regular_file()) {
-            std::string ext = entry.path().extension().string();
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (ext == ".wav" || ext == ".mp3") {
+            if (isSupportedAudioExtension(entry.path().extension().string())) {
                 audioFiles.push_back(entry.path());
             }
         }
     }
 
     if (audioFiles.empty()) {
-        result.error = "No WAV or MP3 files were found in the selected directory.";
+        result.error = "No WAV, MP3, or M4A files were found in the selected directory.";
         return result;
     }
 
@@ -97,7 +141,6 @@ AudioDirectoryInspectionResult AudioAttachmentService::inspectAudioDirectory(con
     };
     std::vector<AudioDetails> details;
 
-    int currentChannel = 0;
     for (const auto& file : audioFiles) {
         juce::File jFile(file.string());
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(jFile));
@@ -119,16 +162,16 @@ AudioDirectoryInspectionResult AudioAttachmentService::inspectAudioDirectory(con
         SongTrack track;
         track.name = file.stem().string();
         track.filePath = fs::absolute(file).string();
-        track.outputChannel = currentChannel;
+        track.outputChannel = 0; // Default to Ch 1 (or Stereo Ch 1-2 for stereo files)
+        track.stereoOutput = (numChannels >= 2);
         track.gain = 1.0f;
         track.muted = false;
+        track.numChannels = numChannels;
         result.tracks.push_back(track);
-
-        currentChannel += (numChannels >= 2) ? 2 : 1;
     }
 
     if (result.tracks.empty()) {
-        result.error = "No readable WAV or MP3 files were found in the selected directory.";
+        result.error = "No readable WAV, MP3, or M4A files were found in the selected directory.";
         return result;
     }
 
@@ -151,13 +194,27 @@ AudioDirectoryInspectionResult AudioAttachmentService::inspectAudioDirectory(con
     return result;
 }
 
-std::vector<SongTrack> AudioAttachmentService::copyTracksToSongDirectory(int64_t songId, const std::vector<SongTrack>& tracks) {
-    auto destDir = getSongTracksDir(songId);
+int AudioAttachmentService::getAudioChannelCount(const std::string& filePath) {
+    if (filePath.empty()) return 0;
+    juce::File jFile(filePath);
+    if (!jFile.existsAsFile()) return 0;
+
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(jFile));
+    return reader ? static_cast<int>(reader->numChannels) : 0;
+}
+
+std::vector<SongTrack> AudioAttachmentService::copyTracksToSongDirectory(int64_t songId,
+                                                                         const std::string& songTitle,
+                                                                         const std::vector<SongTrack>& tracks) {
+    auto destSongDir = getSongStorageDir(songId, songTitle);
+    auto destDir = destSongDir / "tracks";
     fs::create_directories(destDir);
 
-    clearSongTrackDirectory(songId);
-
     std::vector<SongTrack> copied;
+    std::set<std::string> keptFilenames;
+
     for (const auto& track : tracks) {
         fs::path src(track.filePath);
         if (!fs::exists(src) || !fs::is_regular_file(src)) {
@@ -166,13 +223,43 @@ std::vector<SongTrack> AudioAttachmentService::copyTracksToSongDirectory(int64_t
 
         fs::path dest = destDir / src.filename();
         std::error_code ec;
-        fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        bool sameFile = fs::exists(dest, ec) && fs::equivalent(src, dest, ec);
+        if (!sameFile) {
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        }
+
+        keptFilenames.insert(dest.filename().string());
 
         SongTrack updated = track;
         updated.name = src.stem().string();
         updated.filePath = fs::absolute(dest).string();
         copied.push_back(updated);
     }
+
+    // Remove any stale audio files in destDir that are no longer part of this song
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(destDir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        if (isSupportedAudioExtension(entry.path().extension().string()) &&
+            keptFilenames.find(entry.path().filename().string()) == keptFilenames.end()) {
+            fs::remove(entry.path(), ec);
+        }
+    }
+
+    // Clean up any legacy/renamed storage directories for this song ID (e.g. old "4" or "4_Old_Title")
+    auto root = getProjectRoot() / "uploaded_tracks";
+    const std::string exactName = std::to_string(songId);
+    const std::string prefix = exactName + "_";
+    const std::string canonicalName = destSongDir.filename().string();
+
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (!entry.is_directory()) continue;
+        std::string name = entry.path().filename().string();
+        if (name != canonicalName && (name == exactName || name.rfind(prefix, 0) == 0)) {
+            fs::remove_all(entry.path(), ec);
+        }
+    }
+
     return copied;
 }
 

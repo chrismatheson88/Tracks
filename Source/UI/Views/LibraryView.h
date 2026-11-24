@@ -34,7 +34,9 @@ private:
     std::vector<Song> songs_;
     std::optional<Song> currentSong_;
     std::vector<SongTrack> pendingTracks_;
+    std::vector<SongSection> pendingSections_;
     bool isDirty_ = false;
+    bool tracksModified_ = false;
 
     // Left panel: Song list
     juce::ListBox songListBox_;
@@ -64,14 +66,15 @@ private:
 
     // Attachment section
     juce::Label attachmentHeader_{{}, "Audio Stems / Backing Tracks:"};
-    juce::TextButton attachFolderButton_{"Select Audio Folder..."};
+    juce::TextButton attachFolderButton_{"Add Tracks"};
+    juce::TextButton addSectionsButton_{"Add Sections"};
     juce::Label attachmentStatusLabel_;
 
     // Tracks viewport / component
     juce::Viewport tracksViewport_;
     std::unique_ptr<juce::Component> tracksContainer_;
 
-    juce::TextButton saveButton_{"Save Edits to Library"};
+    juce::TextButton saveButton_{"Save"};
     juce::TextButton cancelButton_{"Cancel"};
 
     std::unique_ptr<juce::FileChooser> fileChooser_;
@@ -79,9 +82,11 @@ private:
     void loadSongToEditor(const Song& song);
     void clearEditor();
     void markDirty(bool dirty);
+    void updateAttachmentStatusAndButtons();
     void rebuildTrackWidgets();
     void saveCurrentSong();
     void handleChooseFolder();
+    void handleAddSections();
 };
 
 } // namespace tracks

@@ -18,13 +18,18 @@ struct AudioDirectoryInspectionResult {
 class AudioAttachmentService {
 public:
     static std::filesystem::path getProjectRoot();
-    static std::filesystem::path getSongStorageDir(int64_t songId);
-    static std::filesystem::path getSongTracksDir(int64_t songId);
+    static bool isSupportedAudioExtension(const std::string& extension);
+    static std::string sanitizeSongTitleForPath(const std::string& songTitle);
+    static std::filesystem::path getSongStorageDir(int64_t songId, const std::string& songTitle = "");
+    static std::filesystem::path getSongTracksDir(int64_t songId, const std::string& songTitle = "");
     static void removeSongStorage(int64_t songId);
-    static void clearSongTrackDirectory(int64_t songId);
+    static void clearSongTrackDirectory(int64_t songId, const std::string& songTitle = "");
 
     static AudioDirectoryInspectionResult inspectAudioDirectory(const std::string& directoryPath);
-    static std::vector<SongTrack> copyTracksToSongDirectory(int64_t songId, const std::vector<SongTrack>& tracks);
+    static int getAudioChannelCount(const std::string& filePath);
+    static std::vector<SongTrack> copyTracksToSongDirectory(int64_t songId,
+                                                            const std::string& songTitle,
+                                                            const std::vector<SongTrack>& tracks);
 };
 
 } // namespace tracks

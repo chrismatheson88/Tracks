@@ -30,6 +30,9 @@ AppTheme::AppTheme() {
     setColour(juce::ListBox::outlineColourId, borderCol);
     setColour(juce::Slider::trackColourId, primaryBlue);
     setColour(juce::Slider::thumbColourId, textLight);
+    setColour(juce::ToggleButton::textColourId, textLight);
+    setColour(juce::ToggleButton::tickColourId, primaryBlue);
+    setColour(juce::ToggleButton::tickDisabledColourId, borderCol);
 }
 
 void AppTheme::drawButtonBackground(juce::Graphics& g,

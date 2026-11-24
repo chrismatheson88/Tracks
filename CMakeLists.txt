@@ -19,19 +19,21 @@ endif()
 
 find_package(SQLite3 REQUIRED)
 
-# Embedded audio binary data (clicks and female count-in voice)
+# Embedded audio binary data (clicks and female guide voice)
 juce_add_binary_data(AudioBinaryData
     SOURCES
-        assets/clicks/tone_normal.wav
-        assets/clicks/tone_accent.wav
-        assets/countin/female/one.wav
-        assets/countin/female/two.wav
-        assets/countin/female/three.wav
-        assets/countin/female/four.wav
-        assets/countin/female/five.wav
-        assets/countin/female/six.wav
-        assets/countin/female/seven.wav
-        assets/countin/female/eight.wav
+        assets/clicks/tone/quarter.wav
+        assets/clicks/tone/accent.wav
+        assets/clicks/tone/eighth.wav
+        assets/clicks/tone/sixteenth.wav
+        assets/guide/female/count-1.wav
+        assets/guide/female/count-2.wav
+        assets/guide/female/count-3.wav
+        assets/guide/female/count-4.wav
+        assets/guide/female/count-5.wav
+        assets/guide/female/count-6.wav
+        assets/guide/female/count-7.wav
+        assets/guide/female/count-8.wav
 )
 
 juce_add_gui_app(Tracks

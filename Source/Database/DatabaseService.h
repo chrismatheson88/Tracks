@@ -27,6 +27,13 @@ public:
     std::vector<Song> listSongs();
     std::optional<Song> loadSong(int64_t songId);
     std::vector<SongTrack> listTracksForSong(int64_t songId);
+    void updateTrackMix(int64_t trackId, float gain, int outputChannel, bool stereoOutput = true);
+    void updateSongClickSubdivisions(int64_t songId,
+                                     bool clickEighths,
+                                     bool clickSixteenths,
+                                     float clickEighthsGain,
+                                     float clickSixteenthsGain);
+    void saveSongSections(int64_t songId, std::vector<SongSection>& sections);
     void deleteSong(int64_t songId);
 
     // Setlists

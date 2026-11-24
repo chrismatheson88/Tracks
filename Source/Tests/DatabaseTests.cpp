@@ -28,15 +28,37 @@ void runDatabaseTests() {
     t1.name = "Click";
     t1.filePath = "/path/to/click.wav";
     t1.outputChannel = 0;
+    t1.stereoOutput = false;
     t1.gain = 0.8f;
+    t1.trackKey = "G";
+    t1.numChannels = 1;
     s1.addTrack(t1);
 
     tracks::SongTrack t2;
     t2.name = "Backing Track";
     t2.filePath = "/path/to/backing.wav";
     t2.outputChannel = 1;
+    t2.stereoOutput = true;
     t2.gain = 1.0f;
+    t2.trackKey = "G";
+    t2.numChannels = 2;
     s1.addTrack(t2);
+
+    tracks::SongSection sec1;
+    sec1.name = "Intro";
+    sec1.lengthBars = 4;
+    sec1.orderIndex = 0;
+    s1.sections.push_back(sec1);
+
+    tracks::SongSection sec2;
+    sec2.name = "Verse 1";
+    sec2.lengthBars = 8;
+    sec2.orderIndex = 1;
+    s1.sections.push_back(sec2);
+    s1.clickEighths = true;
+    s1.clickSixteenths = false;
+    s1.clickEighthsGain = 0.65f;
+    s1.clickSixteenthsGain = 0.5f;
 
     tracks::Song savedS1 = db.saveSong(s1);
     assert(savedS1.id.has_value());
@@ -47,9 +69,33 @@ void runDatabaseTests() {
     assert(loadedS1->title == "Amazing Grace");
     assert(loadedS1->tempo == 72);
     assert(loadedS1->timeSignature == "3/4");
+    assert(loadedS1->clickEighths == true);
+    assert(loadedS1->clickSixteenths == false);
+    assert(std::abs(loadedS1->clickEighthsGain - 0.65f) < 1e-4f);
+    assert(std::abs(loadedS1->clickSixteenthsGain - 0.5f) < 1e-4f);
+
+    db.updateSongClickSubdivisions(s1Id, true, true, 0.8f, 0.4f);
+    auto updatedClickS1 = db.loadSong(s1Id);
+    assert(updatedClickS1.has_value());
+    assert(updatedClickS1->clickEighths == true);
+    assert(updatedClickS1->clickSixteenths == true);
+    assert(std::abs(updatedClickS1->clickEighthsGain - 0.8f) < 1e-4f);
+    assert(std::abs(updatedClickS1->clickSixteenthsGain - 0.4f) < 1e-4f);
+    loadedS1 = updatedClickS1;
     assert(loadedS1->tracks.size() == 2);
     assert(loadedS1->tracks[0].name == "Click");
+    assert(loadedS1->tracks[0].trackKey == "G");
+    assert(loadedS1->tracks[0].numChannels == 1);
+    assert(loadedS1->tracks[0].stereoOutput == false);
     assert(loadedS1->tracks[1].name == "Backing Track");
+    assert(loadedS1->tracks[1].trackKey == "G");
+    assert(loadedS1->tracks[1].numChannels == 2);
+    assert(loadedS1->tracks[1].stereoOutput == true);
+    assert(loadedS1->sections.size() == 2);
+    assert(loadedS1->sections[0].name == "Intro");
+    assert(loadedS1->sections[0].lengthBars == 4);
+    assert(loadedS1->sections[1].name == "Verse 1");
+    assert(loadedS1->sections[1].lengthBars == 8);
 
     // Test 2: Update Song (and verify track replacement)
     std::cout << "[Test] Updating Song..." << std::endl;

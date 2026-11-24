@@ -35,10 +35,14 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
             saveSetting("audio.device", name);
             channelCountLabel_.setText("Available Channels: " + juce::String(audioEngine_.getCurrentOutputChannels()),
                                        juce::dontSendNotification);
+            populateChannelBoxes();
         }
     };
 
-    refreshDevicesButton_.onClick = [this]() { populateDevices(); };
+    refreshDevicesButton_.onClick = [this]() {
+        populateDevices();
+        populateChannelBoxes();
+    };
     addAndMakeVisible(refreshDevicesButton_);
 
     channelCountLabel_.setFont(juce::Font(11.0f, juce::Font::plain));
@@ -48,25 +52,17 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
     // Routing section
     setupSection(routingSectionLabel_);
 
-    auto populateChannels = [](juce::ComboBox& box) {
-        for (int ch = 1; ch <= 16; ++ch) {
-            box.addItem("Channel " + juce::String(ch), ch);
-        }
-    };
-
     setupField(clickChannelLabel_);
-    populateChannels(clickChannelBox_);
     clickChannelBox_.onChange = [this]() {
-        int ch = clickChannelBox_.getSelectedId() - 1;
+        int ch = std::max(0, clickChannelBox_.getSelectedId() - 1);
         audioEngine_.setClickChannel(ch);
         saveSetting("volume.channel.click_db", std::to_string(ch));
     };
     addAndMakeVisible(clickChannelBox_);
 
     setupField(guideChannelLabel_);
-    populateChannels(guideChannelBox_);
     guideChannelBox_.onChange = [this]() {
-        int ch = guideChannelBox_.getSelectedId() - 1;
+        int ch = std::max(0, guideChannelBox_.getSelectedId() - 1);
         audioEngine_.setGuideChannel(ch);
         saveSetting("volume.channel.guide_db", std::to_string(ch));
     };
@@ -76,13 +72,23 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
     setupSection(assetsSectionLabel_);
 
     setupField(clickSoundLabel_);
-    clickSoundBox_.addItem("Embedded Tone (Accent / Normal)", 1);
-    clickSoundBox_.setSelectedId(1, juce::dontSendNotification);
+    clickSoundBox_.onChange = [this]() {
+        auto pack = clickSoundBox_.getText().toStdString();
+        if (!pack.empty()) {
+            audioEngine_.selectClickPack(pack);
+            saveSetting("audio.click_pack", pack);
+        }
+    };
     addAndMakeVisible(clickSoundBox_);
 
     setupField(voiceLabel_);
-    voiceBox_.addItem("Embedded Female English Voice", 1);
-    voiceBox_.setSelectedId(1, juce::dontSendNotification);
+    voiceBox_.onChange = [this]() {
+        auto pack = voiceBox_.getText().toStdString();
+        if (!pack.empty()) {
+            audioEngine_.selectVoicePack(pack);
+            saveSetting("audio.voice_pack", pack);
+        }
+    };
     addAndMakeVisible(voiceBox_);
 
     // Volumes section
@@ -141,18 +147,65 @@ void SettingsView::populateDevices() {
                                juce::dontSendNotification);
 }
 
-void SettingsView::refreshSettings() {
-    populateDevices();
+void SettingsView::populateChannelBoxes() {
+    const int numChannels = std::max(1, audioEngine_.getCurrentOutputChannels());
+
+    auto fillBox = [numChannels](juce::ComboBox& box, int currentCh) {
+        box.clear(juce::dontSendNotification);
+        for (int ch = 1; ch <= numChannels; ++ch) {
+            box.addItem("Channel " + juce::String(ch), ch);
+        }
+        box.setSelectedId(std::clamp(currentCh + 1, 1, numChannels), juce::dontSendNotification);
+    };
 
     int clickCh = 0;
     try { clickCh = std::stoi(db_.getAppSetting("volume.channel.click_db", "0")); } catch (...) {}
-    clickChannelBox_.setSelectedId(clickCh + 1, juce::dontSendNotification);
+    clickCh = std::clamp(clickCh, 0, numChannels - 1);
+    fillBox(clickChannelBox_, clickCh);
     audioEngine_.setClickChannel(clickCh);
 
     int guideCh = 0;
     try { guideCh = std::stoi(db_.getAppSetting("volume.channel.guide_db", "0")); } catch (...) {}
-    guideChannelBox_.setSelectedId(guideCh + 1, juce::dontSendNotification);
+    guideCh = std::clamp(guideCh, 0, numChannels - 1);
+    fillBox(guideChannelBox_, guideCh);
     audioEngine_.setGuideChannel(guideCh);
+}
+
+void SettingsView::refreshSettings() {
+    populateDevices();
+    populateChannelBoxes();
+
+    // Populate Click Sound packs (supports WAV, MP3, M4A)
+    auto clickPacks = audioEngine_.getAvailableClickPacks();
+    clickSoundBox_.clear(juce::dontSendNotification);
+    std::string savedClickPack = db_.getAppSetting("audio.click_pack", "");
+    int selectedClickId = 1;
+    for (size_t i = 0; i < clickPacks.size(); ++i) {
+        clickSoundBox_.addItem(clickPacks[i], static_cast<int>(i + 1));
+        if (!savedClickPack.empty() && clickPacks[i] == savedClickPack) {
+            selectedClickId = static_cast<int>(i + 1);
+        }
+    }
+    if (!clickPacks.empty()) {
+        clickSoundBox_.setSelectedId(selectedClickId, juce::dontSendNotification);
+        audioEngine_.selectClickPack(clickPacks[static_cast<size_t>(selectedClickId - 1)]);
+    }
+
+    // Populate Guide Voice packs from assets/guide/<directory> (supports WAV, MP3, M4A)
+    auto voicePacks = audioEngine_.getAvailableVoicePacks();
+    voiceBox_.clear(juce::dontSendNotification);
+    std::string savedVoicePack = db_.getAppSetting("audio.voice_pack", "");
+    int selectedVoiceId = 1;
+    for (size_t i = 0; i < voicePacks.size(); ++i) {
+        voiceBox_.addItem(voicePacks[i], static_cast<int>(i + 1));
+        if (!savedVoicePack.empty() && voicePacks[i] == savedVoicePack) {
+            selectedVoiceId = static_cast<int>(i + 1);
+        }
+    }
+    if (!voicePacks.empty()) {
+        voiceBox_.setSelectedId(selectedVoiceId, juce::dontSendNotification);
+        audioEngine_.selectVoicePack(voicePacks[static_cast<size_t>(selectedVoiceId - 1)]);
+    }
 
     float masterDb = 0.0f;
     try { masterDb = std::stof(db_.getAppSetting("volume.master_db", "0.0")); } catch (...) {}
