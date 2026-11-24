@@ -60,6 +60,8 @@ target_sources(Tracks PRIVATE
     Source/Services/AudioAttachmentService.cpp
     Source/UI/Widgets/BeatPlayheadComponent.h
     Source/UI/Widgets/BeatPlayheadComponent.cpp
+    Source/UI/Widgets/CalendarPopupComponent.h
+    Source/UI/Widgets/CalendarPopupComponent.cpp
     Source/UI/Widgets/OutputMeterComponent.h
     Source/UI/Widgets/OutputMeterComponent.cpp
     Source/UI/Widgets/TransportComponent.h

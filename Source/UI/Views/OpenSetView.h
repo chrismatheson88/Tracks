@@ -46,6 +46,7 @@ private:
 
     juce::Label dateLabel_{{}, "Date:"};
     juce::TextEditor dateEditor_;
+    juce::TextButton datePickerButton_{"Pick"};
 
     juce::Label timeLabel_{{}, "Time:"};
     juce::TextEditor timeEditor_;
@@ -82,6 +83,7 @@ private:
     void applyOverridesFromUI();
     void saveOverridesToMasterSong();
     void populateAddSongPicker();
+    void showCalendarPopup();
 };
 
 } // namespace tracks

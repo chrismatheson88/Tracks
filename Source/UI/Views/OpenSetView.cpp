@@ -1,5 +1,6 @@
 #include "OpenSetView.h"
 #include "../../Common/AppTheme.h"
+#include "../Widgets/CalendarPopupComponent.h"
 #include <algorithm>
 
 namespace tracks {
@@ -59,6 +60,10 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     setupMeta(dateLabel_, dateEditor_);
     setupMeta(timeLabel_, timeEditor_);
     setupMeta(notesLabel_, notesEditor_);
+
+    datePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
+    datePickerButton_.onClick = [this]() { showCalendarPopup(); };
+    addAndMakeVisible(datePickerButton_);
 
     // Set entries listbox
     entryListBox_.setModel(this);
@@ -459,10 +464,12 @@ void OpenSetView::resized() {
 
     rightCol.removeFromTop(gap);
     auto r2 = rightCol.removeFromTop(rowH);
-    dateLabel_.setBounds(r2.removeFromLeft(60));
-    dateEditor_.setBounds(r2.removeFromLeft(100));
+    dateLabel_.setBounds(r2.removeFromLeft(45));
+    dateEditor_.setBounds(r2.removeFromLeft(80));
+    r2.removeFromLeft(4);
+    datePickerButton_.setBounds(r2.removeFromLeft(40));
     r2.removeFromLeft(8);
-    timeLabel_.setBounds(r2.removeFromLeft(40));
+    timeLabel_.setBounds(r2.removeFromLeft(38));
     timeEditor_.setBounds(r2);
 
     rightCol.removeFromTop(gap);
@@ -516,6 +523,15 @@ void OpenSetView::resized() {
 
     leftArea.removeFromBottom(12);
     entryListBox_.setBounds(leftArea);
+}
+
+void OpenSetView::showCalendarPopup() {
+    auto cal = std::make_unique<CalendarPopupComponent>(dateEditor_.getText());
+    cal->onDateSelected = [this](const juce::String& selectedDate) {
+        dateEditor_.setText(selectedDate, false);
+        saveCurrentSetlist();
+    };
+    juce::CallOutBox::launchAsynchronously(std::move(cal), dateEditor_.getScreenBounds(), nullptr);
 }
 
 } // namespace tracks
