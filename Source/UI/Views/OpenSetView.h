@@ -50,6 +50,7 @@ private:
 
     juce::Label timeLabel_{{}, "Time:"};
     juce::TextEditor timeEditor_;
+    juce::TextButton timePickerButton_{"Pick"};
 
     juce::Label notesLabel_{{}, "Notes:"};
     juce::TextEditor notesEditor_;
@@ -84,6 +85,7 @@ private:
     void saveOverridesToMasterSong();
     void populateAddSongPicker();
     void showCalendarPopup();
+    void showTimePopup();
 };
 
 } // namespace tracks

@@ -62,6 +62,8 @@ target_sources(Tracks PRIVATE
     Source/UI/Widgets/BeatPlayheadComponent.cpp
     Source/UI/Widgets/CalendarPopupComponent.h
     Source/UI/Widgets/CalendarPopupComponent.cpp
+    Source/UI/Widgets/TimePopupComponent.h
+    Source/UI/Widgets/TimePopupComponent.cpp
     Source/UI/Widgets/OutputMeterComponent.h
     Source/UI/Widgets/OutputMeterComponent.cpp
     Source/UI/Widgets/TransportComponent.h

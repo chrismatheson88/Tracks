@@ -1,6 +1,7 @@
 #include "OpenSetView.h"
 #include "../../Common/AppTheme.h"
 #include "../Widgets/CalendarPopupComponent.h"
+#include "../Widgets/TimePopupComponent.h"
 #include <algorithm>
 
 namespace tracks {
@@ -64,6 +65,10 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     datePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
     datePickerButton_.onClick = [this]() { showCalendarPopup(); };
     addAndMakeVisible(datePickerButton_);
+
+    timePickerButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgInput);
+    timePickerButton_.onClick = [this]() { showTimePopup(); };
+    addAndMakeVisible(timePickerButton_);
 
     // Set entries listbox
     entryListBox_.setModel(this);
@@ -459,23 +464,27 @@ void OpenSetView::resized() {
     int gap = 6;
 
     auto r1 = rightCol.removeFromTop(rowH);
-    nameLabel_.setBounds(r1.removeFromLeft(60));
+    nameLabel_.setBounds(r1.removeFromLeft(50));
     nameEditor_.setBounds(r1);
 
     rightCol.removeFromTop(gap);
     auto r2 = rightCol.removeFromTop(rowH);
-    dateLabel_.setBounds(r2.removeFromLeft(45));
-    dateEditor_.setBounds(r2.removeFromLeft(80));
-    r2.removeFromLeft(4);
-    datePickerButton_.setBounds(r2.removeFromLeft(40));
-    r2.removeFromLeft(8);
-    timeLabel_.setBounds(r2.removeFromLeft(38));
-    timeEditor_.setBounds(r2);
+    dateLabel_.setBounds(r2.removeFromLeft(50));
+    dateEditor_.setBounds(r2.removeFromLeft(130));
+    r2.removeFromLeft(6);
+    datePickerButton_.setBounds(r2.removeFromLeft(45));
 
     rightCol.removeFromTop(gap);
-    auto r3 = rightCol.removeFromTop(50);
-    notesLabel_.setBounds(r3.removeFromLeft(60));
-    notesEditor_.setBounds(r3);
+    auto r3 = rightCol.removeFromTop(rowH);
+    timeLabel_.setBounds(r3.removeFromLeft(50));
+    timeEditor_.setBounds(r3.removeFromLeft(130));
+    r3.removeFromLeft(6);
+    timePickerButton_.setBounds(r3.removeFromLeft(45));
+
+    rightCol.removeFromTop(gap);
+    auto r4 = rightCol.removeFromTop(44);
+    notesLabel_.setBounds(r4.removeFromLeft(50));
+    notesEditor_.setBounds(r4);
 
     rightCol.removeFromTop(gap);
     saveSetButton_.setBounds(rightCol.removeFromTop(28));
@@ -532,6 +541,15 @@ void OpenSetView::showCalendarPopup() {
         saveCurrentSetlist();
     };
     juce::CallOutBox::launchAsynchronously(std::move(cal), dateEditor_.getScreenBounds(), nullptr);
+}
+
+void OpenSetView::showTimePopup() {
+    auto timePop = std::make_unique<TimePopupComponent>(timeEditor_.getText());
+    timePop->onTimeSelected = [this](const juce::String& selectedTime) {
+        timeEditor_.setText(selectedTime, false);
+        saveCurrentSetlist();
+    };
+    juce::CallOutBox::launchAsynchronously(std::move(timePop), timeEditor_.getScreenBounds(), nullptr);
 }
 
 } // namespace tracks
