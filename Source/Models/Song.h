@@ -46,6 +46,28 @@ struct SongSection {
     }
 };
 
+struct SongArrangement {
+    std::optional<int64_t> id;
+    std::string name = "Main";
+    int tempo = 120;
+    std::string key = "C";
+    std::string timeSignature = "4/4";
+    bool clickEighths = false;
+    bool clickSixteenths = false;
+    float clickEighthsGain = 1.0f;
+    float clickSixteenthsGain = 1.0f;
+    std::vector<SongTrack> tracks;
+    std::vector<SongSection> sections;
+
+    std::string toDisplayLabel() const {
+        std::ostringstream oss;
+        oss << (name.empty() ? "Main" : name)
+            << " (" << tempo << " BPM, " << (key.empty() ? "C" : key)
+            << ", " << (timeSignature.empty() ? "4/4" : timeSignature) << ")";
+        return oss.str();
+    }
+};
+
 struct Song {
     std::optional<int64_t> id;
     std::string title;
@@ -60,9 +82,42 @@ struct Song {
     float clickSixteenthsGain = 1.0f;
     std::vector<SongTrack> tracks;
     std::vector<SongSection> sections;
+    std::vector<SongArrangement> arrangements;
+    std::optional<int64_t> activeArrangementId; // Runtime selection for playback & caching
 
     void addTrack(const SongTrack& track) {
         tracks.push_back(track);
+    }
+
+    const SongArrangement* findArrangement(std::optional<int64_t> arrId) const {
+        if (arrangements.empty()) return nullptr;
+        if (arrId.has_value()) {
+            for (const auto& arr : arrangements) {
+                if (arr.id.has_value() && *arr.id == *arrId) {
+                    return &arr;
+                }
+            }
+        }
+        return &arrangements.front();
+    }
+
+    SongArrangement* findArrangement(std::optional<int64_t> arrId) {
+        if (arrangements.empty()) return nullptr;
+        if (arrId.has_value()) {
+            for (auto& arr : arrangements) {
+                if (arr.id.has_value() && *arr.id == *arrId) {
+                    return &arr;
+                }
+            }
+        }
+        return &arrangements.front();
+    }
+
+    bool hasAnyTracks() const {
+        for (const auto& arr : arrangements) {
+            if (!arr.tracks.empty()) return true;
+        }
+        return !tracks.empty();
     }
 
     std::string toSummary() const {

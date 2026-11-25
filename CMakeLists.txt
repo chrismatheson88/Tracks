@@ -34,12 +34,14 @@ juce_add_binary_data(AudioBinaryData
         assets/guide/female/count-6.wav
         assets/guide/female/count-7.wav
         assets/guide/female/count-8.wav
+        assets/icon/TracksLogo.png
 )
 
 juce_add_gui_app(Tracks
     PRODUCT_NAME "Tracks"
     COMPANY_NAME "Tracks"
     BUNDLE_ID "com.tracks.desktop"
+    ICON_BIG assets/icon/TracksIcon.png
 )
 
 target_sources(Tracks PRIVATE

@@ -33,8 +33,9 @@ private:
 
     std::vector<Song> songs_;
     std::optional<Song> currentSong_;
-    std::vector<SongTrack> pendingTracks_;
-    std::vector<SongSection> pendingSections_;
+    std::vector<SongArrangement> pendingArrangements_;
+    std::vector<int64_t> removedArrangementIds_;
+    int selectedArrangementIndex_ = -1;
     bool isDirty_ = false;
     bool tracksModified_ = false;
 
@@ -64,10 +65,12 @@ private:
     juce::Label notesLabel_{{}, "Notes:"};
     juce::TextEditor notesEditor_;
 
-    // Attachment section
-    juce::Label attachmentHeader_{{}, "Audio Stems / Backing Tracks:"};
-    juce::TextButton attachFolderButton_{"Add Tracks"};
-    juce::TextButton addSectionsButton_{"Add Sections"};
+    // Arrangements / Backing tracks section
+    juce::Label attachmentHeader_{{}, "Arrangements:"};
+    juce::ComboBox arrangementPicker_;
+    juce::TextButton attachFolderButton_{"Add Arrangement"};
+    juce::TextButton addSectionsButton_{"Track Sections"};
+    juce::TextButton removeArrangementButton_{"Remove"};
     juce::Label attachmentStatusLabel_;
 
     // Tracks viewport / component
@@ -82,11 +85,13 @@ private:
     void loadSongToEditor(const Song& song);
     void clearEditor();
     void markDirty(bool dirty);
+    void refreshArrangementPicker();
     void updateAttachmentStatusAndButtons();
     void rebuildTrackWidgets();
     void saveCurrentSong();
     void handleChooseFolder();
     void handleAddSections();
+    void handleRemoveArrangement();
 };
 
 } // namespace tracks

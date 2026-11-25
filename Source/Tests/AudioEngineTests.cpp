@@ -290,6 +290,10 @@ void testSongStorageDirNaming() {
     auto dir3 = tracks::AudioAttachmentService::getSongStorageDir(7, "");
     assert(dir3.filename().string() == "7");
 
+    auto arrDir = tracks::AudioAttachmentService::getArrangementStorageDir(4, "House of the Lord", 2, "Quiet Final Chorus");
+    assert(arrDir.parent_path().filename().string() == "4_House_of_the_Lord");
+    assert(arrDir.filename().string() == "2_Quiet_Final_Chorus");
+
     // Verify M4A support in AudioAttachmentService (including reading real M4A asset if present)
     assert(tracks::AudioAttachmentService::isSupportedAudioExtension(".wav"));
     assert(tracks::AudioAttachmentService::isSupportedAudioExtension(".mp3"));

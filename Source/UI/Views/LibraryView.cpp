@@ -82,10 +82,22 @@ LibraryView::LibraryView(DatabaseService& db, AudioEngine& audioEngine)
     timeSigBox_.onChange = [this]() { markDirty(true); };
     addAndMakeVisible(timeSigBox_);
 
-    // Attachment header & button
+    // Arrangements header & controls
     attachmentHeader_.setFont(juce::Font(14.0f, juce::Font::bold));
     attachmentHeader_.setColour(juce::Label::textColourId, AppTheme::textLight);
     addAndMakeVisible(attachmentHeader_);
+
+    arrangementPicker_.setTextWhenNoChoicesAvailable("No arrangements");
+    arrangementPicker_.setTextWhenNothingSelected("No arrangements");
+    arrangementPicker_.onChange = [this]() {
+        int idx = arrangementPicker_.getSelectedItemIndex();
+        if (idx >= 0 && idx < static_cast<int>(pendingArrangements_.size())) {
+            selectedArrangementIndex_ = idx;
+            updateAttachmentStatusAndButtons();
+            rebuildTrackWidgets();
+        }
+    };
+    addAndMakeVisible(arrangementPicker_);
 
     attachFolderButton_.onClick = [this]() { handleChooseFolder(); };
     addAndMakeVisible(attachFolderButton_);
@@ -93,6 +105,11 @@ LibraryView::LibraryView(DatabaseService& db, AudioEngine& audioEngine)
     addSectionsButton_.setEnabled(false);
     addSectionsButton_.onClick = [this]() { handleAddSections(); };
     addAndMakeVisible(addSectionsButton_);
+
+    removeArrangementButton_.setColour(juce::TextButton::buttonColourId, AppTheme::dangerRed);
+    removeArrangementButton_.setEnabled(false);
+    removeArrangementButton_.onClick = [this]() { handleRemoveArrangement(); };
+    addAndMakeVisible(removeArrangementButton_);
 
     attachmentStatusLabel_.setFont(juce::Font(11.0f, juce::Font::plain));
     attachmentStatusLabel_.setColour(juce::Label::textColourId, AppTheme::warningAmber);
@@ -169,9 +186,21 @@ void LibraryView::loadSongToEditor(const Song& song) {
     timeSigBox_.setText(song.timeSignature, juce::dontSendNotification);
     notesEditor_.setText(song.notes, false);
 
-    pendingTracks_ = song.tracks;
-    pendingSections_ = song.sections;
+    pendingArrangements_ = song.arrangements;
+    if (pendingArrangements_.empty() && (!song.tracks.empty() || !song.sections.empty())) {
+        SongArrangement fallback;
+        fallback.name = "Main";
+        fallback.tempo = song.tempo;
+        fallback.key = song.key;
+        fallback.timeSignature = song.timeSignature;
+        fallback.tracks = song.tracks;
+        fallback.sections = song.sections;
+        pendingArrangements_.push_back(std::move(fallback));
+    }
+    removedArrangementIds_.clear();
+    selectedArrangementIndex_ = pendingArrangements_.empty() ? -1 : 0;
     tracksModified_ = false;
+    refreshArrangementPicker();
     updateAttachmentStatusAndButtons();
     rebuildTrackWidgets();
     markDirty(false);
@@ -186,37 +215,82 @@ void LibraryView::clearEditor() {
     keyBox_.setText("C", juce::dontSendNotification);
     timeSigBox_.setText("4/4", juce::dontSendNotification);
     notesEditor_.setText("", false);
-    pendingTracks_.clear();
-    pendingSections_.clear();
+    pendingArrangements_.clear();
+    removedArrangementIds_.clear();
+    selectedArrangementIndex_ = -1;
     tracksModified_ = false;
+    refreshArrangementPicker();
     updateAttachmentStatusAndButtons();
     rebuildTrackWidgets();
     markDirty(false);
 }
 
-void LibraryView::updateAttachmentStatusAndButtons() {
-    const bool hasTracks = !pendingTracks_.empty();
-    addSectionsButton_.setEnabled(hasTracks);
+void LibraryView::refreshArrangementPicker() {
+    arrangementPicker_.clear(juce::dontSendNotification);
+    for (size_t i = 0; i < pendingArrangements_.size(); ++i) {
+        arrangementPicker_.addItem(pendingArrangements_[i].toDisplayLabel(), static_cast<int>(i + 1));
+    }
+    if (pendingArrangements_.empty()) {
+        selectedArrangementIndex_ = -1;
+        arrangementPicker_.setSelectedId(0, juce::dontSendNotification);
+        arrangementPicker_.setEnabled(false);
+    } else {
+        if (selectedArrangementIndex_ < 0 || selectedArrangementIndex_ >= static_cast<int>(pendingArrangements_.size())) {
+            selectedArrangementIndex_ = 0;
+        }
+        arrangementPicker_.setEnabled(true);
+        arrangementPicker_.setSelectedId(selectedArrangementIndex_ + 1, juce::dontSendNotification);
+    }
+}
 
-    if (!hasTracks) {
+void LibraryView::updateAttachmentStatusAndButtons() {
+    const bool hasSelection = (selectedArrangementIndex_ >= 0 &&
+                               selectedArrangementIndex_ < static_cast<int>(pendingArrangements_.size()));
+    removeArrangementButton_.setEnabled(hasSelection);
+
+    if (!hasSelection) {
+        addSectionsButton_.setEnabled(false);
         attachmentStatusLabel_.setText("", juce::dontSendNotification);
         return;
     }
 
-    juce::String status = juce::String(pendingTracks_.size()) + " audio file(s) attached";
-    if (!pendingTracks_[0].trackKey.empty()) {
-        status += " (Tracks Key: " + juce::String(pendingTracks_[0].trackKey) + ")";
-    }
-    if (!pendingSections_.empty()) {
+    const auto& arr = pendingArrangements_[static_cast<size_t>(selectedArrangementIndex_)];
+    const bool hasTracks = !arr.tracks.empty();
+    addSectionsButton_.setEnabled(hasTracks);
+
+    juce::String status = juce::String(arr.tracks.size()) + " audio file(s)  |  " +
+                          juce::String(arr.tempo) + " BPM, Key: " + juce::String(arr.key.empty() ? "C" : arr.key) +
+                          ", " + juce::String(arr.timeSignature.empty() ? "4/4" : arr.timeSignature);
+    if (!arr.sections.empty()) {
         int totalBars = 0;
-        for (const auto& sec : pendingSections_) {
+        for (const auto& sec : arr.sections) {
             totalBars += std::max(1, sec.lengthBars);
         }
-        status += "  |  " + juce::String(pendingSections_.size()) +
-                  (pendingSections_.size() == 1 ? " section (" : " sections (") +
+        status += "  |  " + juce::String(arr.sections.size()) +
+                  (arr.sections.size() == 1 ? " section (" : " sections (") +
                   juce::String(totalBars) + " bars)";
     }
     attachmentStatusLabel_.setText(status, juce::dontSendNotification);
+}
+
+void LibraryView::handleRemoveArrangement() {
+    if (selectedArrangementIndex_ < 0 ||
+        selectedArrangementIndex_ >= static_cast<int>(pendingArrangements_.size())) {
+        return;
+    }
+    const auto& removed = pendingArrangements_[static_cast<size_t>(selectedArrangementIndex_)];
+    if (removed.id.has_value()) {
+        removedArrangementIds_.push_back(*removed.id);
+    }
+    pendingArrangements_.erase(pendingArrangements_.begin() + selectedArrangementIndex_);
+    if (selectedArrangementIndex_ >= static_cast<int>(pendingArrangements_.size())) {
+        selectedArrangementIndex_ = static_cast<int>(pendingArrangements_.size()) - 1;
+    }
+    tracksModified_ = true;
+    refreshArrangementPicker();
+    updateAttachmentStatusAndButtons();
+    rebuildTrackWidgets();
+    markDirty(true);
 }
 
 void LibraryView::markDirty(bool dirty) {
@@ -228,15 +302,27 @@ void LibraryView::markDirty(bool dirty) {
 void LibraryView::handleChooseFolder() {
     class AddTracksDialogContent : public juce::Component {
     public:
-        AddTracksDialogContent(const juce::String& initialKey,
-                               std::function<void(std::vector<SongTrack>, const std::string&, const juce::String&)> onConfirm)
+        AddTracksDialogContent(const juce::String& initialName,
+                               int initialTempo,
+                               const juce::String& initialKey,
+                               const juce::String& initialTimeSig,
+                               std::function<void(SongArrangement, const juce::String&)> onConfirm)
             : onConfirm_(std::move(onConfirm)) {
-            setSize(460, 196);
+            setSize(500, 250);
 
-            dirLabel_.setFont(juce::Font(12.0f, juce::Font::bold));
-            dirLabel_.setColour(juce::Label::textColourId, AppTheme::textLight);
-            addAndMakeVisible(dirLabel_);
+            auto setupLbl = [this](juce::Label& l) {
+                l.setFont(juce::Font(12.0f, juce::Font::bold));
+                l.setColour(juce::Label::textColourId, AppTheme::textLight);
+                addAndMakeVisible(l);
+            };
 
+            setupLbl(nameLabel_);
+            nameEditor_.setJustification(juce::Justification::centredLeft);
+            nameEditor_.setText(initialName, false);
+            nameEditor_.setTextToShowWhenEmpty("e.g. Loud Final Chorus, Quiet Ending...", AppTheme::textMuted.withAlpha(0.6f));
+            addAndMakeVisible(nameEditor_);
+
+            setupLbl(dirLabel_);
             dirEditor_.setJustification(juce::Justification::centredLeft);
             dirEditor_.setTextToShowWhenEmpty("Select a folder with WAV, MP3, or M4A files...", AppTheme::textMuted.withAlpha(0.6f));
             dirEditor_.onTextChange = [this]() {
@@ -248,10 +334,13 @@ void LibraryView::handleChooseFolder() {
             browseButton_.onClick = [this]() { openFolderChooser(); };
             addAndMakeVisible(browseButton_);
 
-            keyLabel_.setFont(juce::Font(12.0f, juce::Font::bold));
-            keyLabel_.setColour(juce::Label::textColourId, AppTheme::textLight);
-            addAndMakeVisible(keyLabel_);
+            setupLbl(tempoLabel_);
+            tempoEditor_.setJustification(juce::Justification::centred);
+            tempoEditor_.setInputRestrictions(3, "0123456789");
+            tempoEditor_.setText(juce::String(initialTempo > 0 ? initialTempo : 120), false);
+            addAndMakeVisible(tempoEditor_);
 
+            setupLbl(keyLabel_);
             const char* keys[] = { "C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B",
                                    "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
             int kid = 1;
@@ -264,6 +353,19 @@ void LibraryView::handleChooseFolder() {
                 keyBox_.setSelectedId(1, juce::dontSendNotification);
             }
             addAndMakeVisible(keyBox_);
+
+            setupLbl(timeSigLabel_);
+            const char* sigs[] = { "4/4", "3/4", "6/8", "12/8", "2/4", "5/4", "7/8" };
+            int sid = 1;
+            for (const char* s : sigs) {
+                timeSigBox_.addItem(s, sid++);
+            }
+            if (initialTimeSig.isNotEmpty()) {
+                timeSigBox_.setText(initialTimeSig, juce::dontSendNotification);
+            } else {
+                timeSigBox_.setSelectedId(1, juce::dontSendNotification);
+            }
+            addAndMakeVisible(timeSigBox_);
 
             statusLabel_.setFont(juce::Font(11.5f, juce::Font::plain));
             statusLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
@@ -286,41 +388,62 @@ void LibraryView::handleChooseFolder() {
         void resized() override {
             auto area = getLocalBounds().reduced(16);
 
+            auto row0 = area.removeFromTop(28);
+            nameLabel_.setBounds(row0.removeFromLeft(96));
+            nameEditor_.setBounds(row0);
+
+            area.removeFromTop(12);
+
             auto row1 = area.removeFromTop(28);
-            dirLabel_.setBounds(row1.removeFromLeft(88));
+            dirLabel_.setBounds(row1.removeFromLeft(96));
             browseButton_.setBounds(row1.removeFromRight(84));
             row1.removeFromRight(8);
             dirEditor_.setBounds(row1);
 
-            area.removeFromTop(14);
+            area.removeFromTop(12);
 
             auto row2 = area.removeFromTop(28);
-            keyLabel_.setBounds(row2.removeFromLeft(88));
-            keyBox_.setBounds(row2.removeFromLeft(110));
+            tempoLabel_.setBounds(row2.removeFromLeft(96));
+            tempoEditor_.setBounds(row2.removeFromLeft(66));
+            row2.removeFromLeft(14);
+            keyLabel_.setBounds(row2.removeFromLeft(36));
+            keyBox_.setBounds(row2.removeFromLeft(78));
+            row2.removeFromLeft(14);
+            timeSigLabel_.setBounds(row2.removeFromLeft(70));
+            timeSigBox_.setBounds(row2);
 
             area.removeFromTop(12);
             statusLabel_.setBounds(area.removeFromTop(32));
 
             auto bottomRow = area.removeFromBottom(32);
-            addButton_.setBounds(bottomRow.removeFromRight(106));
+            addButton_.setBounds(bottomRow.removeFromRight(128));
             bottomRow.removeFromRight(8);
             cancelButton_.setBounds(bottomRow.removeFromRight(84));
         }
 
     private:
-        juce::Label dirLabel_{{}, "Directory:"};
+        juce::Label nameLabel_{{}, "Arrangement:"};
+        juce::TextEditor nameEditor_;
+
+        juce::Label dirLabel_{{}, "Audio Folder:"};
         juce::TextEditor dirEditor_;
         juce::TextButton browseButton_{"Browse..."};
 
-        juce::Label keyLabel_{{}, "Tracks Key:"};
+        juce::Label tempoLabel_{{}, "Tempo (BPM):"};
+        juce::TextEditor tempoEditor_;
+
+        juce::Label keyLabel_{{}, "Key:"};
         juce::ComboBox keyBox_;
+
+        juce::Label timeSigLabel_{{}, "Time Sig:"};
+        juce::ComboBox timeSigBox_;
 
         juce::Label statusLabel_;
         juce::TextButton cancelButton_{"Cancel"};
-        juce::TextButton addButton_{"Add Tracks"};
+        juce::TextButton addButton_{"Add Arrangement"};
 
         std::unique_ptr<juce::FileChooser> chooser_;
-        std::function<void(std::vector<SongTrack>, const std::string&, const juce::String&)> onConfirm_;
+        std::function<void(SongArrangement, const juce::String&)> onConfirm_;
 
         void openFolderChooser() {
             auto startDir = dirEditor_.getText().trim().isNotEmpty()
@@ -381,21 +504,32 @@ void LibraryView::handleChooseFolder() {
                 return;
             }
 
-            std::string selectedKey = keyBox_.getText().toStdString();
-            for (auto& track : insp.tracks) {
-                track.trackKey = selectedKey;
-            }
+            SongArrangement arr;
+            arr.name = nameEditor_.getText().trim().toStdString();
+            if (arr.name.empty()) arr.name = "Main";
+            arr.tempo = std::clamp(tempoEditor_.getText().trim().getIntValue(), 20, 300);
+            if (tempoEditor_.getText().trim().getIntValue() <= 0) arr.tempo = 120;
+            arr.key = keyBox_.getText().toStdString();
+            if (arr.key.empty()) arr.key = "C";
+            arr.timeSignature = timeSigBox_.getText().toStdString();
+            if (arr.timeSignature.empty()) arr.timeSignature = "4/4";
+            arr.clickEighths = false;
+            arr.clickSixteenths = false;
+            arr.clickEighthsGain = 1.0f;
+            arr.clickSixteenthsGain = 1.0f;
 
-            juce::String status = juce::String(insp.tracks.size()) + " audio file(s) found";
-            if (!selectedKey.empty()) {
-                status += " (Tracks Key: " + juce::String(selectedKey) + ")";
+            for (auto& track : insp.tracks) {
+                track.trackKey = arr.key;
             }
+            arr.tracks = std::move(insp.tracks);
+
+            juce::String status = juce::String(arr.tracks.size()) + " audio file(s) ready for \"" + juce::String(arr.name) + "\"";
             if (!insp.mismatches.empty()) {
                 status += " — " + juce::String(insp.mismatches[0]);
             }
 
             if (onConfirm_) {
-                onConfirm_(std::move(insp.tracks), selectedKey, status);
+                onConfirm_(std::move(arr), status);
             }
             closeDialog();
         }
@@ -407,26 +541,36 @@ void LibraryView::handleChooseFolder() {
         }
     };
 
-    juce::String initialKey = keyBox_.getText();
-    if (!pendingTracks_.empty() && !pendingTracks_[0].trackKey.empty()) {
-        initialKey = pendingTracks_[0].trackKey;
-    }
+    juce::String defaultName = pendingArrangements_.empty()
+                                   ? juce::String("Main")
+                                   : ("Arrangement " + juce::String(pendingArrangements_.size() + 1));
+    int defaultTempo = tempoEditor_.getText().trim().getIntValue();
+    if (defaultTempo <= 0) defaultTempo = 120;
+    juce::String defaultKey = keyBox_.getText();
+    juce::String defaultTimeSig = timeSigBox_.getText();
 
     juce::Component::SafePointer<LibraryView> safeView(this);
     auto* content = new AddTracksDialogContent(
-        initialKey,
-        [safeView](std::vector<SongTrack> tracks, const std::string& /*trackKey*/, const juce::String& status) {
+        defaultName,
+        defaultTempo,
+        defaultKey,
+        defaultTimeSig,
+        [safeView](SongArrangement newArr, const juce::String& status) {
             if (safeView == nullptr) return;
-            safeView->pendingTracks_ = std::move(tracks);
+            safeView->pendingArrangements_.push_back(std::move(newArr));
+            safeView->selectedArrangementIndex_ = static_cast<int>(safeView->pendingArrangements_.size()) - 1;
             safeView->tracksModified_ = true;
-            safeView->addSectionsButton_.setEnabled(!safeView->pendingTracks_.empty());
-            safeView->attachmentStatusLabel_.setText(status, juce::dontSendNotification);
+            safeView->refreshArrangementPicker();
+            safeView->updateAttachmentStatusAndButtons();
+            if (status.isNotEmpty()) {
+                safeView->attachmentStatusLabel_.setText(status, juce::dontSendNotification);
+            }
             safeView->rebuildTrackWidgets();
             safeView->markDirty(true);
         });
 
     juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = "Add Tracks";
+    options.dialogTitle = "Add Arrangement";
     options.content.setOwned(content);
     options.componentToCentreAround = getTopLevelComponent();
     options.dialogBackgroundColour = AppTheme::bgDark;
@@ -437,7 +581,13 @@ void LibraryView::handleChooseFolder() {
 }
 
 void LibraryView::handleAddSections() {
-    if (pendingTracks_.empty()) return;
+    if (selectedArrangementIndex_ < 0 ||
+        selectedArrangementIndex_ >= static_cast<int>(pendingArrangements_.size())) {
+        return;
+    }
+    if (pendingArrangements_[static_cast<size_t>(selectedArrangementIndex_)].tracks.empty()) {
+        return;
+    }
 
     class AddSectionsDialogContent : public juce::Component, public juce::ListBoxModel {
     public:
@@ -702,20 +852,42 @@ void LibraryView::handleAddSections() {
         }
     };
 
+    const int targetArrIndex = selectedArrangementIndex_;
+    const auto& initialSecs = pendingArrangements_[static_cast<size_t>(targetArrIndex)].sections;
+    const juce::String arrTitle = pendingArrangements_[static_cast<size_t>(targetArrIndex)].name;
+
     juce::Component::SafePointer<LibraryView> safeView(this);
     auto* content = new AddSectionsDialogContent(
-        pendingSections_,
-        [safeView](std::vector<SongSection> updatedSections) {
+        initialSecs,
+        [safeView, targetArrIndex](std::vector<SongSection> updatedSections) {
             if (safeView == nullptr) return;
-            safeView->pendingSections_ = std::move(updatedSections);
+            if (targetArrIndex < 0 || targetArrIndex >= static_cast<int>(safeView->pendingArrangements_.size())) return;
 
-            if (safeView->currentSong_ && safeView->currentSong_->id.has_value()) {
+            auto& arr = safeView->pendingArrangements_[static_cast<size_t>(targetArrIndex)];
+            arr.sections = std::move(updatedSections);
+
+            if (safeView->currentSong_ && safeView->currentSong_->id.has_value() && arr.id.has_value()) {
                 int64_t songId = *safeView->currentSong_->id;
-                safeView->db_.saveSongSections(songId, safeView->pendingSections_);
-                safeView->currentSong_->sections = safeView->pendingSections_;
+                int64_t arrId = *arr.id;
+                safeView->db_.saveArrangementSections(songId, arrId, arr.sections);
+                for (auto& curArr : safeView->currentSong_->arrangements) {
+                    if (curArr.id.has_value() && *curArr.id == arrId) {
+                        curArr.sections = arr.sections;
+                        break;
+                    }
+                }
+                if (!safeView->currentSong_->arrangements.empty()) {
+                    safeView->currentSong_->sections = safeView->currentSong_->arrangements.front().sections;
+                }
                 for (auto& s : safeView->songs_) {
                     if (s.id.has_value() && *s.id == songId) {
-                        s.sections = safeView->pendingSections_;
+                        for (auto& sArr : s.arrangements) {
+                            if (sArr.id.has_value() && *sArr.id == arrId) {
+                                sArr.sections = arr.sections;
+                                break;
+                            }
+                        }
+                        if (!s.arrangements.empty()) s.sections = s.arrangements.front().sections;
                         break;
                     }
                 }
@@ -727,7 +899,7 @@ void LibraryView::handleAddSections() {
         });
 
     juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = "Add Sections";
+    options.dialogTitle = arrTitle.isNotEmpty() ? ("Track Sections — " + arrTitle) : "Track Sections";
     options.content.setOwned(content);
     options.componentToCentreAround = getTopLevelComponent();
     options.dialogBackgroundColour = AppTheme::bgDark;
@@ -804,19 +976,23 @@ void LibraryView::rebuildTrackWidgets() {
     };
 
     std::vector<FileRowInfo> rows;
-    rows.reserve(pendingTracks_.size());
-    for (auto& track : pendingTracks_) {
-        FileRowInfo info;
-        if (!track.filePath.empty()) {
-            info.fileName = juce::File(track.filePath).getFileName();
-            if (track.numChannels <= 0) {
-                track.numChannels = AudioAttachmentService::getAudioChannelCount(track.filePath);
+    if (selectedArrangementIndex_ >= 0 &&
+        selectedArrangementIndex_ < static_cast<int>(pendingArrangements_.size())) {
+        auto& activeTracks = pendingArrangements_[static_cast<size_t>(selectedArrangementIndex_)].tracks;
+        rows.reserve(activeTracks.size());
+        for (auto& track : activeTracks) {
+            FileRowInfo info;
+            if (!track.filePath.empty()) {
+                info.fileName = juce::File(track.filePath).getFileName();
+                if (track.numChannels <= 0) {
+                    track.numChannels = AudioAttachmentService::getAudioChannelCount(track.filePath);
+                }
+            } else {
+                info.fileName = track.name;
             }
-        } else {
-            info.fileName = track.name;
+            info.numChannels = track.numChannels;
+            rows.push_back(std::move(info));
         }
-        info.numChannels = track.numChannels;
-        rows.push_back(std::move(info));
     }
 
     int rowH = 28;
@@ -831,14 +1007,15 @@ void LibraryView::saveCurrentSong() {
     Song s;
     const bool isNewSong = !(currentSong_ && currentSong_->id.has_value());
     const std::string previousTitle = currentSong_ ? currentSong_->title : "";
+    std::optional<Song> persistedSong;
     if (currentSong_ && currentSong_->id.has_value()) {
         s.id = currentSong_->id;
-        // Preserve per-song click subdivision settings managed from the transport/mixer
-        if (auto persisted = db_.loadSong(*currentSong_->id); persisted.has_value()) {
-            s.clickEighths = persisted->clickEighths;
-            s.clickSixteenths = persisted->clickSixteenths;
-            s.clickEighthsGain = persisted->clickEighthsGain;
-            s.clickSixteenthsGain = persisted->clickSixteenthsGain;
+        persistedSong = db_.loadSong(*currentSong_->id);
+        if (persistedSong.has_value()) {
+            s.clickEighths = persistedSong->clickEighths;
+            s.clickSixteenths = persistedSong->clickSixteenths;
+            s.clickEighthsGain = persistedSong->clickEighthsGain;
+            s.clickSixteenthsGain = persistedSong->clickSixteenthsGain;
         } else {
             s.clickEighths = currentSong_->clickEighths;
             s.clickSixteenths = currentSong_->clickSixteenths;
@@ -857,29 +1034,65 @@ void LibraryView::saveCurrentSong() {
     s.key = keyBox_.getText().toStdString();
     s.timeSignature = timeSigBox_.getText().toStdString();
     s.notes = notesEditor_.getText().toStdString();
-    s.tracks = pendingTracks_;
-    s.sections = pendingSections_;
+
+    // Preserve per-arrangement click subdivisions remembered from sets
+    s.arrangements = pendingArrangements_;
+    if (persistedSong.has_value()) {
+        for (auto& arr : s.arrangements) {
+            if (!arr.id.has_value()) continue;
+            for (const auto& pArr : persistedSong->arrangements) {
+                if (pArr.id.has_value() && *pArr.id == *arr.id) {
+                    arr.clickEighths = pArr.clickEighths;
+                    arr.clickSixteenths = pArr.clickSixteenths;
+                    arr.clickEighthsGain = pArr.clickEighthsGain;
+                    arr.clickSixteenthsGain = pArr.clickSixteenthsGain;
+                    break;
+                }
+            }
+        }
+    }
 
     const bool titleChanged = (!isNewSong && s.title != previousTitle);
     const bool audioFilesChanged = isNewSong || tracksModified_ || titleChanged;
+    const int previouslySelectedArrIdx = selectedArrangementIndex_;
 
-    // 1. Save to DB first to acquire ID if new
+    // 1. Save to DB first to acquire song ID and any new arrangement IDs
     Song saved = db_.saveSong(s);
 
-    // 2. Copy/migrate pending audio files only when tracks or song folder name changed
-    if (saved.id.has_value() && !pendingTracks_.empty() && audioFilesChanged) {
-        saved.tracks = AudioAttachmentService::copyTracksToSongDirectory(*saved.id, saved.title, pendingTracks_);
-        // Update database with canonical file paths
-        saved = db_.saveSong(saved);
-    }
-
+    // 2. Copy/migrate audio files per arrangement when tracks or song folder name changed
     if (saved.id.has_value() && audioFilesChanged) {
+        for (int64_t removedId : removedArrangementIds_) {
+            AudioAttachmentService::removeArrangementStorage(*saved.id, removedId);
+        }
+        bool updatedPaths = false;
+        for (auto& arr : saved.arrangements) {
+            if (arr.id.has_value() && !arr.tracks.empty()) {
+                arr.tracks = AudioAttachmentService::copyTracksToArrangementDirectory(
+                    *saved.id, saved.title, *arr.id, arr.name, arr.tracks);
+                updatedPaths = true;
+            }
+        }
+        if (saved.arrangements.empty()) {
+            AudioAttachmentService::removeSongStorage(*saved.id);
+        } else if (titleChanged) {
+            AudioAttachmentService::cleanupStaleSongDirs(*saved.id, saved.title);
+        }
+        if (updatedPaths) {
+            saved = db_.saveSong(saved);
+        }
         audioEngine_.invalidateCachedSong(*saved.id);
     }
 
     currentSong_ = saved;
+    removedArrangementIds_.clear();
     tracksModified_ = false;
     loadSongToEditor(saved);
+    if (previouslySelectedArrIdx >= 0 && previouslySelectedArrIdx < static_cast<int>(pendingArrangements_.size())) {
+        selectedArrangementIndex_ = previouslySelectedArrIdx;
+        refreshArrangementPicker();
+        updateAttachmentStatusAndButtons();
+        rebuildTrackWidgets();
+    }
     refreshSongList();
     markDirty(false);
 }
@@ -942,11 +1155,15 @@ void LibraryView::resized() {
     notesEditor_.setBounds(row4);
 
     rightCol.removeFromTop(16);
-    auto attachRow = rightCol.removeFromTop(32);
-    attachmentHeader_.setBounds(attachRow.removeFromLeft(230));
-    attachFolderButton_.setBounds(attachRow.removeFromLeft(110));
+    auto attachRow = rightCol.removeFromTop(28);
+    attachmentHeader_.setBounds(attachRow.removeFromLeft(110));
+    arrangementPicker_.setBounds(attachRow.removeFromLeft(220));
     attachRow.removeFromLeft(8);
-    addSectionsButton_.setBounds(attachRow.removeFromLeft(118));
+    attachFolderButton_.setBounds(attachRow.removeFromLeft(126));
+    attachRow.removeFromLeft(6);
+    addSectionsButton_.setBounds(attachRow.removeFromLeft(108));
+    attachRow.removeFromLeft(6);
+    removeArrangementButton_.setBounds(attachRow.removeFromLeft(74));
 
     rightCol.removeFromTop(4);
     attachmentStatusLabel_.setBounds(rightCol.removeFromTop(20));

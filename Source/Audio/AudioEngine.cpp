@@ -639,21 +639,26 @@ void AudioEngine::applyCachedAudio(const std::shared_ptr<CachedSongAudio>& cache
     isLoadingTracks_.store(false, std::memory_order_relaxed);
 }
 
-void AudioEngine::enqueueSongLoadLocked(const Song& song, bool highPriority) {
-    if (!song.id.has_value() || extractTrackPaths(song).empty()) return;
+std::string AudioEngine::makeCacheKey(const Song& song) {
+    if (!song.id.has_value()) return "";
+    return std::to_string(*song.id) + ":" + std::to_string(song.activeArrangementId.value_or(0));
+}
 
-    int64_t id = *song.id;
+void AudioEngine::enqueueSongLoadLocked(const Song& song, bool highPriority) {
+    std::string key = makeCacheKey(song);
+    if (key.empty() || extractTrackPaths(song).empty()) return;
+
     auto targetPaths = extractTrackPaths(song);
 
-    auto cacheIt = songAudioCache_.find(id);
+    auto cacheIt = songAudioCache_.find(key);
     if (cacheIt != songAudioCache_.end() && cacheIt->second && cacheIt->second->trackPaths == targetPaths) {
         return; // Already cached
     }
 
-    // Remove duplicate queued entry for this song ID
+    // Remove duplicate queued entry for this (songId, arrangementId) key
     preloadQueue_.erase(
         std::remove_if(preloadQueue_.begin(), preloadQueue_.end(),
-                       [id](const Song& queued) { return queued.id.has_value() && *queued.id == id; }),
+                       [&key](const Song& queued) { return makeCacheKey(queued) == key; }),
         preloadQueue_.end());
 
     if (highPriority) {
@@ -679,20 +684,21 @@ void AudioEngine::loaderLoop() {
         }
 
         auto decoded = decodeSongAudio(nextSong);
+        std::string nextKey = makeCacheKey(nextSong);
 
         bool shouldApplyToActive = false;
         {
             std::lock_guard<std::mutex> lock(cacheMutex_);
             if (shuttingDown_) return;
 
-            // Keep result if it belongs to the current setlist generation OR is the active song
-            bool isActiveSong = nextSong.id.has_value() && activeSongId_.has_value() &&
-                                (*nextSong.id == *activeSongId_) &&
+            // Keep result if it belongs to the current setlist generation OR is the active song/arrangement
+            bool isActiveSong = !nextKey.empty() && !activeCacheKey_.empty() &&
+                                (nextKey == activeCacheKey_) &&
                                 (activeTrackPaths_.empty() || decoded->trackPaths == activeTrackPaths_);
 
             if (gen == preloadGeneration_ || isActiveSong) {
-                if (nextSong.id.has_value()) {
-                    songAudioCache_[*nextSong.id] = decoded;
+                if (!nextKey.empty()) {
+                    songAudioCache_[nextKey] = decoded;
                 }
                 if (isActiveSong) {
                     activeTrackPaths_ = decoded->trackPaths;
@@ -708,10 +714,11 @@ void AudioEngine::loaderLoop() {
 }
 
 void AudioEngine::preloadSetlist(int64_t setlistId, const std::vector<Song>& songs) {
-    std::unordered_set<int64_t> neededIds;
+    std::unordered_set<std::string> neededKeys;
     for (const auto& s : songs) {
-        if (s.id.has_value() && !extractTrackPaths(s).empty()) {
-            neededIds.insert(*s.id);
+        std::string key = makeCacheKey(s);
+        if (!key.empty() && !extractTrackPaths(s).empty()) {
+            neededKeys.insert(key);
         }
     }
 
@@ -725,16 +732,16 @@ void AudioEngine::preloadSetlist(int64_t setlistId, const std::vector<Song>& son
             preloadQueue_.clear();
         }
 
-        // Evict cached songs that are not part of this setlist
+        // Evict cached items that are not part of this setlist
         for (auto it = songAudioCache_.begin(); it != songAudioCache_.end(); ) {
-            if (neededIds.find(it->first) == neededIds.end()) {
+            if (neededKeys.find(it->first) == neededKeys.end()) {
                 it = songAudioCache_.erase(it);
             } else {
                 ++it;
             }
         }
 
-        // Queue any songs in this setlist not yet cached (or whose files changed)
+        // Queue any songs/arrangements in this setlist not yet cached (or whose files changed)
         for (const auto& s : songs) {
             enqueueSongLoadLocked(s, false);
         }
@@ -744,8 +751,15 @@ void AudioEngine::preloadSetlist(int64_t setlistId, const std::vector<Song>& son
 
 void AudioEngine::invalidateCachedSong(int64_t songId) {
     std::lock_guard<std::mutex> lock(cacheMutex_);
-    songAudioCache_.erase(songId);
-    if (activeSongId_.has_value() && *activeSongId_ == songId) {
+    std::string prefix = std::to_string(songId) + ":";
+    for (auto it = songAudioCache_.begin(); it != songAudioCache_.end(); ) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            it = songAudioCache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (activeCacheKey_.rfind(prefix, 0) == 0) {
         activeTrackPaths_.clear();
     }
 }
@@ -753,12 +767,13 @@ void AudioEngine::invalidateCachedSong(int64_t songId) {
 void AudioEngine::loadSong(const Song& song) {
     syncSectionCuesForSections(song.sections);
     auto newPaths = extractTrackPaths(song);
+    std::string cacheKey = makeCacheKey(song);
 
-    // Fast path 1: Same song and identical track files -> only update tempo/time signature/sections!
+    // Fast path 1: Same song/arrangement and identical track files -> only update tempo/time signature/sections!
     {
         std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-        if (song.id.has_value() && activeSongId_.has_value() &&
-            *song.id == *activeSongId_ && newPaths == activeTrackPaths_) {
+        if (!cacheKey.empty() && !activeCacheKey_.empty() &&
+            cacheKey == activeCacheKey_ && newPaths == activeTrackPaths_) {
             std::lock_guard<std::mutex> audioLock(audioMutex_);
             metronome_.setTempo(song.tempo);
             metronome_.setTimeSignature(song.timeSignature);
@@ -781,7 +796,7 @@ void AudioEngine::loadSong(const Song& song) {
     if (newPaths.empty()) {
         {
             std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-            activeSongId_ = song.id;
+            activeCacheKey_ = cacheKey;
             activeTrackPaths_.clear();
         }
         applyCachedAudio(nullptr, &song);
@@ -792,11 +807,11 @@ void AudioEngine::loadSong(const Song& song) {
     std::shared_ptr<CachedSongAudio> cachedHit;
     {
         std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-        activeSongId_ = song.id;
+        activeCacheKey_ = cacheKey;
         activeTrackPaths_ = newPaths;
 
-        if (song.id.has_value()) {
-            auto it = songAudioCache_.find(*song.id);
+        if (!cacheKey.empty()) {
+            auto it = songAudioCache_.find(cacheKey);
             if (it != songAudioCache_.end() && it->second && it->second->trackPaths == newPaths) {
                 cachedHit = it->second;
             }
@@ -976,8 +991,8 @@ void AudioEngine::setTrackMuted(int trackIndex, bool muted) {
     waveformVersion_.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-    if (activeSongId_.has_value()) {
-        auto it = songAudioCache_.find(*activeSongId_);
+    if (!activeCacheKey_.empty()) {
+        auto it = songAudioCache_.find(activeCacheKey_);
         if (it != songAudioCache_.end() && it->second &&
             trackIndex < static_cast<int>(it->second->tracks.size())) {
             it->second->tracks[trackIndex].track.muted = muted;
@@ -1008,8 +1023,8 @@ void AudioEngine::setTrackGain(int trackIndex, float gain) {
     waveformVersion_.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-    if (activeSongId_.has_value()) {
-        auto it = songAudioCache_.find(*activeSongId_);
+    if (!activeCacheKey_.empty()) {
+        auto it = songAudioCache_.find(activeCacheKey_);
         if (it != songAudioCache_.end() && it->second &&
             trackIndex < static_cast<int>(it->second->tracks.size())) {
             it->second->tracks[trackIndex].track.gain = gain;
@@ -1030,8 +1045,8 @@ void AudioEngine::setTrackOutputChannel(int trackIndex, int channel, bool stereo
     }
 
     std::lock_guard<std::mutex> cacheLock(cacheMutex_);
-    if (activeSongId_.has_value()) {
-        auto it = songAudioCache_.find(*activeSongId_);
+    if (!activeCacheKey_.empty()) {
+        auto it = songAudioCache_.find(activeCacheKey_);
         if (it != songAudioCache_.end() && it->second &&
             trackIndex < static_cast<int>(it->second->tracks.size())) {
             it->second->tracks[trackIndex].track.outputChannel = channel;

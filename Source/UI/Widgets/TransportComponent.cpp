@@ -186,13 +186,123 @@ private:
     std::function<void(int, bool)> onChannelChanged_;
 };
 
+class TransportComponent::TransportIconButton : public juce::Button {
+public:
+    enum class IconType { Previous, Play, Pause, Stop, Next };
+
+    TransportIconButton(const juce::String& name, IconType type, juce::Colour baseColour)
+        : juce::Button(name), iconType_(type), baseColour_(baseColour) {
+        setTooltip(name);
+    }
+
+    void setIconType(IconType type) {
+        if (iconType_ != type) {
+            iconType_ = type;
+            repaint();
+        }
+    }
+
+    void setBaseColour(juce::Colour col) {
+        if (baseColour_ != col) {
+            baseColour_ = col;
+            repaint();
+        }
+    }
+
+    void paintButton(juce::Graphics& g, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override {
+        auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+        const bool enabled = isEnabled();
+
+        juce::Colour bg = baseColour_;
+        if (!enabled) {
+            bg = bg.withAlpha(0.45f);
+        } else if (shouldDrawButtonAsDown) {
+            bg = bg.darker(0.18f);
+        } else if (shouldDrawButtonAsHighlighted) {
+            bg = bg.brighter(0.14f);
+        }
+
+        g.setColour(bg);
+        g.fillRoundedRectangle(bounds, 5.0f);
+
+        g.setColour(enabled ? AppTheme::borderCol.brighter(0.1f) : AppTheme::borderCol.withAlpha(0.45f));
+        g.drawRoundedRectangle(bounds, 5.0f, 1.0f);
+
+        const float cx = bounds.getCentreX();
+        const float cy = bounds.getCentreY();
+        const float iconH = std::min(14.0f, bounds.getHeight() * 0.44f);
+        const float halfH = iconH * 0.5f;
+
+        g.setColour(enabled ? AppTheme::textLight : AppTheme::textMuted.withAlpha(0.45f));
+
+        switch (iconType_) {
+            case IconType::Play: {
+                const float triW = iconH * 0.88f;
+                const float x0 = cx - triW * 0.42f;
+                const float x1 = x0 + triW;
+                juce::Path p;
+                p.addTriangle(x0, cy - halfH, x0, cy + halfH, x1, cy);
+                g.fillPath(p.createPathWithRoundedCorners(1.5f));
+                break;
+            }
+            case IconType::Pause: {
+                const float barW = 4.0f;
+                const float gap = 4.5f;
+                g.fillRoundedRectangle(cx - gap * 0.5f - barW, cy - halfH, barW, iconH, 1.2f);
+                g.fillRoundedRectangle(cx + gap * 0.5f, cy - halfH, barW, iconH, 1.2f);
+                break;
+            }
+            case IconType::Stop: {
+                const float sq = iconH * 0.88f;
+                g.fillRoundedRectangle(cx - sq * 0.5f, cy - sq * 0.5f, sq, sq, 2.0f);
+                break;
+            }
+            case IconType::Previous: {
+                const float barW = 2.8f;
+                const float triW = iconH * 0.72f;
+                const float totalW = barW + 1.5f + triW;
+                const float leftX = cx - totalW * 0.5f;
+                g.fillRoundedRectangle(leftX, cy - halfH, barW, iconH, 1.0f);
+                const float triLeft = leftX + barW + 1.5f;
+                juce::Path p;
+                p.addTriangle(triLeft, cy, triLeft + triW, cy - halfH, triLeft + triW, cy + halfH);
+                g.fillPath(p.createPathWithRoundedCorners(1.2f));
+                break;
+            }
+            case IconType::Next: {
+                const float barW = 2.8f;
+                const float triW = iconH * 0.72f;
+                const float totalW = triW + 1.5f + barW;
+                const float leftX = cx - totalW * 0.5f;
+                juce::Path p;
+                p.addTriangle(leftX, cy - halfH, leftX, cy + halfH, leftX + triW, cy);
+                g.fillPath(p.createPathWithRoundedCorners(1.2f));
+                g.fillRoundedRectangle(leftX + triW + 1.5f, cy - halfH, barW, iconH, 1.0f);
+                break;
+            }
+        }
+    }
+
+private:
+    IconType iconType_;
+    juce::Colour baseColour_;
+};
+
 TransportComponent::TransportComponent(AudioEngine& audioEngine)
     : audioEngine_(audioEngine) {
     setOpaque(true);
 
+    // Previous song button
+    prevSongButton_ = std::make_unique<TransportIconButton>("Previous Song", TransportIconButton::IconType::Previous, AppTheme::bgPanel);
+    prevSongButton_->setEnabled(false);
+    prevSongButton_->onClick = [this]() {
+        if (onPreviousSongClicked) onPreviousSongClicked();
+    };
+    addChildComponent(prevSongButton_.get());
+
     // Play/Pause button
-    playPauseButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
-    playPauseButton_.onClick = [this]() {
+    playPauseButton_ = std::make_unique<TransportIconButton>("Play", TransportIconButton::IconType::Play, AppTheme::primaryBlue);
+    playPauseButton_->onClick = [this]() {
         if (!audioEngine_.isPlaying()) {
             if (onPlayClicked) onPlayClicked();
         } else if (audioEngine_.isPaused()) {
@@ -201,14 +311,22 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
             if (onPauseClicked) onPauseClicked();
         }
     };
-    addAndMakeVisible(playPauseButton_);
+    addAndMakeVisible(playPauseButton_.get());
 
     // Stop button
-    stopButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
-    stopButton_.onClick = [this]() {
+    stopButton_ = std::make_unique<TransportIconButton>("Stop", TransportIconButton::IconType::Stop, AppTheme::bgPanel);
+    stopButton_->onClick = [this]() {
         if (onStopClicked) onStopClicked();
     };
-    addAndMakeVisible(stopButton_);
+    addAndMakeVisible(stopButton_.get());
+
+    // Next song button
+    nextSongButton_ = std::make_unique<TransportIconButton>("Next Song", TransportIconButton::IconType::Next, AppTheme::bgPanel);
+    nextSongButton_->setEnabled(false);
+    nextSongButton_->onClick = [this]() {
+        if (onNextSongClicked) onNextSongClicked();
+    };
+    addChildComponent(nextSongButton_.get());
 
     // Song info labels
     songTitleLabel_.setFont(juce::Font(15.0f, juce::Font::bold));
@@ -221,33 +339,85 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     songArtistLabel_.setText("Select a song from library or set", juce::dontSendNotification);
     addAndMakeVisible(songArtistLabel_);
 
-    // Badges
-    auto setupBadge = [this](juce::Label& lbl) {
-        lbl.setFont(juce::Font(11.0f, juce::Font::bold));
-        lbl.setColour(juce::Label::backgroundColourId, AppTheme::bgInput);
-        lbl.setColour(juce::Label::textColourId, AppTheme::textLight);
-        lbl.setColour(juce::Label::outlineColourId, AppTheme::borderCol);
-        lbl.setJustificationType(juce::Justification::centred);
-        addAndMakeVisible(lbl);
+    // Editable BPM / Key / Time Signature controls
+    tempoEditor_.setFont(juce::Font(11.5f, juce::Font::bold));
+    tempoEditor_.setJustification(juce::Justification::centred);
+    tempoEditor_.setInputRestrictions(3, "0123456789");
+    tempoEditor_.setText("120", false);
+    tempoEditor_.onTextChange = [this]() { commitTempoEditor(false); };
+    tempoEditor_.onReturnKey = [this]() {
+        commitTempoEditor(true);
+        unfocusAllComponents();
     };
+    tempoEditor_.onFocusLost = [this]() { commitTempoEditor(true); };
+    addAndMakeVisible(tempoEditor_);
 
-    setupBadge(tempoBadge_);
-    tempoBadge_.setText("120 BPM", juce::dontSendNotification);
+    bpmSuffixLabel_.setFont(juce::Font(11.0f, juce::Font::bold));
+    bpmSuffixLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+    bpmSuffixLabel_.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(bpmSuffixLabel_);
 
-    setupBadge(keyBadge_);
-    keyBadge_.setText("Key: C", juce::dontSendNotification);
+    keyPrefixLabel_.setFont(juce::Font(11.0f, juce::Font::bold));
+    keyPrefixLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+    keyPrefixLabel_.setJustificationType(juce::Justification::centredRight);
+    addChildComponent(keyPrefixLabel_);
 
-    setupBadge(timeSigBadge_);
-    timeSigBadge_.setText("4/4", juce::dontSendNotification);
+    const char* keys[] = { "C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B",
+                           "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
+    int kid = 1;
+    for (const char* k : keys) {
+        keyBox_.addItem(k, kid++);
+    }
+    keyBox_.setSelectedId(1, juce::dontSendNotification);
+    keyBox_.onChange = [this]() {
+        std::string newKey = keyBox_.getText().toStdString();
+        if (!newKey.empty() && newKey != currentKey_) {
+            currentKey_ = newKey;
+            notifySongParamsChanged();
+        }
+    };
+    addAndMakeVisible(keyBox_);
+
+    const char* sigs[] = { "4/4", "3/4", "6/8", "12/8", "2/4", "5/4", "7/8" };
+    int sid = 1;
+    for (const char* s : sigs) {
+        timeSigBox_.addItem(s, sid++);
+    }
+    timeSigBox_.setSelectedId(1, juce::dontSendNotification);
+    timeSigBox_.onChange = [this]() {
+        std::string newSig = timeSigBox_.getText().toStdString();
+        if (!newSig.empty() && newSig != currentTimeSig_) {
+            currentTimeSig_ = newSig;
+            audioEngine_.setTimeSignature(currentTimeSig_);
+            notifySongParamsChanged();
+        }
+    };
+    addAndMakeVisible(timeSigBox_);
 
     useTracksToggle_.setToggleState(false, juce::dontSendNotification);
     useTracksToggle_.setEnabled(false);
     audioEngine_.setUseTracks(false);
     useTracksToggle_.onClick = [this]() {
         audioEngine_.setUseTracks(useTracksToggle_.getToggleState());
+        applyActiveModeSettings();
         updateTrackStripsEnabled();
+        resized();
+        repaint();
     };
     addAndMakeVisible(useTracksToggle_);
+
+    arrangementBox_.setTextWhenNothingSelected("Arrangement");
+    arrangementBox_.setTextWhenNoChoicesAvailable("No arrangements");
+    arrangementBox_.onChange = [this]() {
+        int idx = arrangementBox_.getSelectedItemIndex();
+        if (idx >= 0 && idx < static_cast<int>(currentArrangements_.size())) {
+            const auto& arr = currentArrangements_[static_cast<size_t>(idx)];
+            if (arr.id.has_value() && onArrangementChanged) {
+                onArrangementChanged(*arr.id);
+            }
+        }
+    };
+    addChildComponent(arrangementBox_);
 
     eighthsToggle_.setToggleState(false, juce::dontSendNotification);
     eighthsToggle_.onClick = [this]() {
@@ -367,9 +537,168 @@ void TransportComponent::setSongInfo(const std::string& title,
                                      const std::string& timeSignature) {
     songTitleLabel_.setText(title.empty() ? "No Song Selected" : title, juce::dontSendNotification);
     songArtistLabel_.setText(artist.empty() ? "—" : artist, juce::dontSendNotification);
-    tempoBadge_.setText(juce::String(tempo) + " BPM", juce::dontSendNotification);
-    keyBadge_.setText("Key: " + (key.empty() ? "C" : key), juce::dontSendNotification);
-    timeSigBadge_.setText(timeSignature.empty() ? "4/4" : timeSignature, juce::dontSendNotification);
+
+    currentTempo_ = std::clamp(tempo > 0 ? tempo : 120, 20, 300);
+    currentKey_ = key.empty() ? "C" : key;
+    currentTimeSig_ = timeSignature.empty() ? "4/4" : timeSignature;
+
+    tempoEditor_.setText(juce::String(currentTempo_), false);
+
+    auto selectOrAddComboItem = [](juce::ComboBox& box, const std::string& value) {
+        juce::String target(value);
+        for (int i = 0; i < box.getNumItems(); ++i) {
+            if (box.getItemText(i) == target) {
+                box.setSelectedItemIndex(i, juce::dontSendNotification);
+                return;
+            }
+        }
+        int newId = box.getNumItems() + 1;
+        box.addItem(target, newId);
+        box.setSelectedId(newId, juce::dontSendNotification);
+    };
+
+    selectOrAddComboItem(keyBox_, currentKey_);
+    selectOrAddComboItem(timeSigBox_, currentTimeSig_);
+}
+
+void TransportComponent::commitTempoEditor(bool clampAndFormat) {
+    auto text = tempoEditor_.getText().trim();
+    int parsed = text.getIntValue();
+
+    if (clampAndFormat) {
+        if (text.isEmpty() || parsed <= 0) {
+            tempoEditor_.setText(juce::String(currentTempo_), false);
+            return;
+        }
+        int clamped = std::clamp(parsed, 20, 300);
+        tempoEditor_.setText(juce::String(clamped), false);
+        if (clamped != currentTempo_) {
+            currentTempo_ = clamped;
+            audioEngine_.setTempo(currentTempo_);
+            notifySongParamsChanged();
+        }
+    } else if (parsed >= 20 && parsed <= 300 && parsed != currentTempo_) {
+        currentTempo_ = parsed;
+        audioEngine_.setTempo(currentTempo_);
+        notifySongParamsChanged();
+    }
+}
+
+void TransportComponent::notifySongParamsChanged() {
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    if (!usingTracks) {
+        clickOnlyTempo_ = currentTempo_;
+        clickOnlyKey_ = currentKey_;
+        clickOnlyTimeSig_ = currentTimeSig_;
+    }
+    if (onSongParamsChanged) {
+        onSongParamsChanged(lastSongId_, currentTempo_, currentKey_, currentTimeSig_);
+    }
+}
+
+void TransportComponent::updateSongParamEditorsEnabled() {
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    tempoEditor_.setEnabled(!usingTracks);
+    keyBox_.setEnabled(!usingTracks);
+    timeSigBox_.setEnabled(!usingTracks);
+}
+
+void TransportComponent::applyActiveModeSettings() {
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    updateSongParamEditorsEnabled();
+
+    const SongArrangement* activeArr = nullptr;
+    if (usingTracks && !currentArrangements_.empty()) {
+        if (activeArrangementId_.has_value()) {
+            for (const auto& arr : currentArrangements_) {
+                if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
+                    activeArr = &arr;
+                    break;
+                }
+            }
+        }
+        if (!activeArr) activeArr = &currentArrangements_.front();
+    }
+
+    int targetTempo = activeArr ? activeArr->tempo : clickOnlyTempo_;
+    std::string targetKey = activeArr ? (activeArr->key.empty() ? "C" : activeArr->key) : clickOnlyKey_;
+    std::string targetSig = activeArr ? (activeArr->timeSignature.empty() ? "4/4" : activeArr->timeSignature) : clickOnlyTimeSig_;
+    bool target8 = activeArr ? activeArr->clickEighths : clickOnlyEighths_;
+    bool target16 = activeArr ? activeArr->clickSixteenths : clickOnlySixteenths_;
+    float target8Gain = activeArr ? activeArr->clickEighthsGain : clickOnlyEighthsGain_;
+    float target16Gain = activeArr ? activeArr->clickSixteenthsGain : clickOnlySixteenthsGain_;
+
+    currentTempo_ = std::clamp(targetTempo > 0 ? targetTempo : 120, 20, 300);
+    currentKey_ = targetKey.empty() ? "C" : targetKey;
+    currentTimeSig_ = targetSig.empty() ? "4/4" : targetSig;
+
+    tempoEditor_.setText(juce::String(currentTempo_), false);
+    auto selectOrAdd = [](juce::ComboBox& box, const std::string& value) {
+        juce::String target(value);
+        for (int i = 0; i < box.getNumItems(); ++i) {
+            if (box.getItemText(i) == target) {
+                box.setSelectedItemIndex(i, juce::dontSendNotification);
+                return;
+            }
+        }
+        int newId = box.getNumItems() + 1;
+        box.addItem(target, newId);
+        box.setSelectedId(newId, juce::dontSendNotification);
+    };
+    selectOrAdd(keyBox_, currentKey_);
+    selectOrAdd(timeSigBox_, currentTimeSig_);
+
+    audioEngine_.setTempo(currentTempo_);
+    audioEngine_.setTimeSignature(currentTimeSig_);
+
+    eighthsToggle_.setToggleState(target8, juce::dontSendNotification);
+    sixteenthsToggle_.setToggleState(target16, juce::dontSendNotification);
+    eighthClickSlider_.setValue(linearToSliderDb(target8Gain), juce::dontSendNotification);
+    sixteenthClickSlider_.setValue(linearToSliderDb(target16Gain), juce::dontSendNotification);
+    audioEngine_.setClickSubdivisions(target8, target16);
+    audioEngine_.setEighthClickGain(target8Gain);
+    audioEngine_.setSixteenthClickGain(target16Gain);
+    updateSubdivisionFaderVisibility();
+}
+
+void TransportComponent::syncArrangements(const std::vector<SongArrangement>& arrangements,
+                                          std::optional<int64_t> activeArrangementId,
+                                          int clickOnlyTempo,
+                                          const std::string& clickOnlyKey,
+                                          const std::string& clickOnlyTimeSig,
+                                          bool clickOnlyEighths,
+                                          bool clickOnlySixteenths,
+                                          float clickOnlyEighthsGain,
+                                          float clickOnlySixteenthsGain) {
+    currentArrangements_ = arrangements;
+    activeArrangementId_ = activeArrangementId;
+    clickOnlyTempo_ = (clickOnlyTempo > 0) ? clickOnlyTempo : 120;
+    clickOnlyKey_ = clickOnlyKey.empty() ? "C" : clickOnlyKey;
+    clickOnlyTimeSig_ = clickOnlyTimeSig.empty() ? "4/4" : clickOnlyTimeSig;
+    clickOnlyEighths_ = clickOnlyEighths;
+    clickOnlySixteenths_ = clickOnlySixteenths;
+    clickOnlyEighthsGain_ = clickOnlyEighthsGain;
+    clickOnlySixteenthsGain_ = clickOnlySixteenthsGain;
+
+    arrangementBox_.clear(juce::dontSendNotification);
+    int selectedIdx = 0;
+    for (size_t i = 0; i < currentArrangements_.size(); ++i) {
+        const auto& arr = currentArrangements_[i];
+        arrangementBox_.addItem(arr.name.empty() ? "Main" : arr.name, static_cast<int>(i + 1));
+        if (activeArrangementId_.has_value() && arr.id.has_value() && *arr.id == *activeArrangementId_) {
+            selectedIdx = static_cast<int>(i);
+        }
+    }
+    if (!currentArrangements_.empty()) {
+        arrangementBox_.setSelectedId(selectedIdx + 1, juce::dontSendNotification);
+        if (!activeArrangementId_.has_value()) {
+            activeArrangementId_ = currentArrangements_[static_cast<size_t>(selectedIdx)].id;
+        }
+    }
+
+    applyActiveModeSettings();
+    resized();
+    repaint();
 }
 
 void TransportComponent::refreshAvailableChannels(int numChannels) {
@@ -410,13 +739,33 @@ void TransportComponent::syncClickSubdivisions(std::optional<int64_t> songId,
 }
 
 void TransportComponent::notifyClickSubdivisionsChanged() {
+    const bool e8 = eighthsToggle_.getToggleState();
+    const bool e16 = sixteenthsToggle_.getToggleState();
+    const float g8 = sliderDbToLinear(static_cast<float>(eighthClickSlider_.getValue()));
+    const float g16 = sliderDbToLinear(static_cast<float>(sixteenthClickSlider_.getValue()));
+
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    std::optional<int64_t> targetArrId;
+    if (usingTracks && activeArrangementId_.has_value()) {
+        targetArrId = activeArrangementId_;
+        for (auto& arr : currentArrangements_) {
+            if (arr.id.has_value() && *arr.id == *targetArrId) {
+                arr.clickEighths = e8;
+                arr.clickSixteenths = e16;
+                arr.clickEighthsGain = g8;
+                arr.clickSixteenthsGain = g16;
+                break;
+            }
+        }
+    } else {
+        clickOnlyEighths_ = e8;
+        clickOnlySixteenths_ = e16;
+        clickOnlyEighthsGain_ = g8;
+        clickOnlySixteenthsGain_ = g16;
+    }
+
     if (!lastSongId_.has_value() || !onSongClickSubdivisionsChanged) return;
-    onSongClickSubdivisionsChanged(
-        *lastSongId_,
-        eighthsToggle_.getToggleState(),
-        sixteenthsToggle_.getToggleState(),
-        sliderDbToLinear(static_cast<float>(eighthClickSlider_.getValue())),
-        sliderDbToLinear(static_cast<float>(sixteenthClickSlider_.getValue())));
+    onSongClickSubdivisionsChanged(*lastSongId_, targetArrId, e8, e16, g8, g16);
 }
 
 void TransportComponent::updateSubdivisionFaderVisibility() {
@@ -476,6 +825,8 @@ void TransportComponent::syncTracksAvailability(std::optional<int64_t> songId,
         rebuildTrackStrips();
     } else {
         updateTrackStripsEnabled();
+        resized();
+        repaint();
     }
 
     lastWaveformVersion_ = audioEngine_.getWaveformVersion();
@@ -566,13 +917,21 @@ void TransportComponent::layoutTrackStrips(int viewportWidth, int viewportHeight
 }
 
 void TransportComponent::setPlayingState(bool isPlaying, bool isPaused) {
+    if (!playPauseButton_) return;
     if (isPlaying && !isPaused) {
-        playPauseButton_.setButtonText("Pause");
-        playPauseButton_.setColour(juce::TextButton::buttonColourId, AppTheme::warningAmber);
+        playPauseButton_->setIconType(TransportIconButton::IconType::Pause);
+        playPauseButton_->setBaseColour(AppTheme::warningAmber);
+        playPauseButton_->setTooltip("Pause");
     } else {
-        playPauseButton_.setButtonText("Play");
-        playPauseButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
+        playPauseButton_->setIconType(TransportIconButton::IconType::Play);
+        playPauseButton_->setBaseColour(AppTheme::primaryBlue);
+        playPauseButton_->setTooltip("Play");
     }
+}
+
+void TransportComponent::setSongNavigationState(bool canGoPrev, bool canGoNext) {
+    if (prevSongButton_) prevSongButton_->setEnabled(canGoPrev);
+    if (nextSongButton_) nextSongButton_->setEnabled(canGoNext);
 }
 
 void TransportComponent::timerCallback() {
@@ -646,7 +1005,8 @@ void TransportComponent::setLayoutMode(LayoutMode mode) {
 
     clickChannelBox_.setVisible(expanded);
     guideChannelBox_.setVisible(expanded);
-    trackStripsViewport_.setVisible(expanded && !trackStrips_.empty());
+    const bool showTrackStrips = expanded && !trackStrips_.empty() && useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    trackStripsViewport_.setVisible(showTrackStrips);
     updateSubdivisionFaderVisibility();
 
     resized();
@@ -683,42 +1043,68 @@ void TransportComponent::resized() {
     if (layoutMode_ == LayoutMode::ExpandedPanel) {
         auto area = getLocalBounds().reduced(16);
 
-        // Top row: Song info on left, Play/Pause + Stop buttons on right
-        auto headerRow = area.removeFromTop(78);
-        auto buttonsArea = headerRow.removeFromRight(236);
-        headerRow.removeFromRight(16);
-
-        auto btnRow = buttonsArea.withSizeKeepingCentre(236, 44);
-        playPauseButton_.setBounds(btnRow.removeFromLeft(128));
-        btnRow.removeFromLeft(10);
-        stopButton_.setBounds(btnRow);
-
-        songTitleLabel_.setBounds(headerRow.removeFromTop(26));
+        // Top row: Full-width song title, artist, and editable BPM/Key/Time Signature + click/track toggles
+        auto headerRow = area.removeFromTop(74);
+        songTitleLabel_.setBounds(headerRow.removeFromTop(24));
         songArtistLabel_.setBounds(headerRow.removeFromTop(18));
         headerRow.removeFromTop(8);
         auto badgeRow = headerRow.removeFromTop(24);
-        tempoBadge_.setBounds(badgeRow.removeFromLeft(74));
+        tempoEditor_.setBounds(badgeRow.removeFromLeft(48));
+        badgeRow.removeFromLeft(4);
+        bpmSuffixLabel_.setBounds(badgeRow.removeFromLeft(32));
+        badgeRow.removeFromLeft(10);
+        keyPrefixLabel_.setVisible(true);
+        keyPrefixLabel_.setBounds(badgeRow.removeFromLeft(30));
+        badgeRow.removeFromLeft(4);
+        keyBox_.setBounds(badgeRow.removeFromLeft(70));
+        badgeRow.removeFromLeft(10);
+        timeSigBox_.setBounds(badgeRow.removeFromLeft(68));
+        badgeRow.removeFromLeft(12);
+        useTracksToggle_.setBounds(badgeRow.removeFromLeft(96));
+        const bool showArrBox = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState() && !currentArrangements_.empty();
+        arrangementBox_.setVisible(showArrBox);
+        if (showArrBox) {
+            badgeRow.removeFromLeft(4);
+            arrangementBox_.setBounds(badgeRow.removeFromLeft(140));
+        }
         badgeRow.removeFromLeft(8);
-        keyBadge_.setBounds(badgeRow.removeFromLeft(74));
-        badgeRow.removeFromLeft(8);
-        timeSigBadge_.setBounds(badgeRow.removeFromLeft(56));
-        badgeRow.removeFromLeft(14);
-        useTracksToggle_.setBounds(badgeRow.removeFromLeft(102));
-        badgeRow.removeFromLeft(8);
-        eighthsToggle_.setBounds(badgeRow.removeFromLeft(66));
-        badgeRow.removeFromLeft(6);
-        sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(72));
+        eighthsToggle_.setBounds(badgeRow.removeFromLeft(62));
+        badgeRow.removeFromLeft(4);
+        sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(68));
+
+        area.removeFromTop(12);
+
+        // Transport controls row: Previous | Play/Pause | Stop | Next icon buttons
+        auto transportRow = area.removeFromTop(36);
+        prevSongButton_->setVisible(true);
+        nextSongButton_->setVisible(true);
+        const int btnGap = 10;
+        const int iconBtnW = 52;
+        const int playW = 68;
+        const int totalBtnW = iconBtnW + btnGap + playW + btnGap + iconBtnW + btnGap + iconBtnW;
+        auto btnGroup = transportRow.withSizeKeepingCentre(std::min(transportRow.getWidth(), totalBtnW), 36);
+        prevSongButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+        btnGroup.removeFromLeft(btnGap);
+        playPauseButton_->setBounds(btnGroup.removeFromLeft(playW));
+        btnGroup.removeFromLeft(btnGap);
+        stopButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+        btnGroup.removeFromLeft(btnGap);
+        nextSongButton_->setBounds(btnGroup);
+
+        area.removeFromTop(12);
+
+        // Middle row: Full-width Beat Playhead / Summed Tracks Waveform
+        int playheadH = std::clamp(area.getHeight() / 3, 96, 138);
+        beatPlayhead_.setBounds(area.removeFromTop(playheadH));
 
         area.removeFromTop(14);
 
-        // Middle row: Full-width Beat Playhead / Summed Tracks Waveform
-        int playheadH = (area.getHeight() >= 360) ? 110 : 96;
-        beatPlayhead_.setBounds(area.removeFromTop(playheadH));
-
-        area.removeFromTop(16);
-
-        // Bottom area: Vertical Mixer Faders (Master, Click, [8th Click], [16th Click], Guide + per-track strips) + Output Peak Meters
-        const bool hasTrackStrips = !trackStrips_.empty();
+        // Bottom area: Shorter Vertical Mixer Faders (Master, Click, [8th Click], [16th Click], Guide + per-track strips) + Output Peak Meters
+        const int maxMixerH = 260;
+        if (area.getHeight() > maxMixerH) {
+            area = area.removeFromTop(maxMixerH);
+        }
+        const bool hasTrackStrips = !trackStrips_.empty() && useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
         const bool showEighths = eighthsToggle_.getToggleState();
         const bool showSixteenths = sixteenthsToggle_.getToggleState();
         clickChannelBox_.setVisible(true);
@@ -799,6 +1185,9 @@ void TransportComponent::resized() {
     }
 
     faderStripBounds_.clear();
+    prevSongButton_->setVisible(false);
+    nextSongButton_->setVisible(false);
+    arrangementBox_.setVisible(false);
     clickChannelBox_.setVisible(false);
     guideChannelBox_.setVisible(false);
     trackStripsViewport_.setVisible(false);
@@ -806,31 +1195,34 @@ void TransportComponent::resized() {
 
     auto area = getLocalBounds().reduced(12, 8);
 
-    // Left controls: Play and Stop buttons
-    auto btnArea = area.removeFromLeft(128);
-    playPauseButton_.setBounds(btnArea.removeFromTop(32));
-    btnArea.removeFromTop(6);
-    stopButton_.setBounds(btnArea.removeFromTop(28));
+    // Left controls: Play/Pause and Stop icon buttons side-by-side
+    auto btnArea = area.removeFromLeft(116).withSizeKeepingCentre(116, 38);
+    playPauseButton_->setBounds(btnArea.removeFromLeft(60));
+    btnArea.removeFromLeft(8);
+    stopButton_->setBounds(btnArea);
 
     area.removeFromLeft(12);
 
     // Song info column
-    auto infoArea = area.removeFromLeft(368);
+    auto infoArea = area.removeFromLeft(392);
     songTitleLabel_.setBounds(infoArea.removeFromTop(20));
     songArtistLabel_.setBounds(infoArea.removeFromTop(16));
     infoArea.removeFromTop(6);
     auto badgeRow = infoArea.removeFromTop(22);
-    tempoBadge_.setBounds(badgeRow.removeFromLeft(54));
+    keyPrefixLabel_.setVisible(false);
+    tempoEditor_.setBounds(badgeRow.removeFromLeft(38));
+    badgeRow.removeFromLeft(2);
+    bpmSuffixLabel_.setBounds(badgeRow.removeFromLeft(28));
     badgeRow.removeFromLeft(4);
-    keyBadge_.setBounds(badgeRow.removeFromLeft(48));
+    keyBox_.setBounds(badgeRow.removeFromLeft(54));
     badgeRow.removeFromLeft(4);
-    timeSigBadge_.setBounds(badgeRow.removeFromLeft(34));
+    timeSigBox_.setBounds(badgeRow.removeFromLeft(54));
     badgeRow.removeFromLeft(6);
-    useTracksToggle_.setBounds(badgeRow.removeFromLeft(90));
-    badgeRow.removeFromLeft(4);
-    eighthsToggle_.setBounds(badgeRow.removeFromLeft(58));
-    badgeRow.removeFromLeft(4);
-    sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(62));
+    useTracksToggle_.setBounds(badgeRow.removeFromLeft(88));
+    badgeRow.removeFromLeft(2);
+    eighthsToggle_.setBounds(badgeRow.removeFromLeft(54));
+    badgeRow.removeFromLeft(2);
+    sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(56));
 
     area.removeFromLeft(12);
 

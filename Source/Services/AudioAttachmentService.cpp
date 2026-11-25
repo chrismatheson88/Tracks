@@ -70,6 +70,25 @@ fs::path AudioAttachmentService::getSongTracksDir(int64_t songId, const std::str
     return getSongStorageDir(songId, songTitle) / "tracks";
 }
 
+fs::path AudioAttachmentService::getArrangementStorageDir(int64_t songId,
+                                                          const std::string& songTitle,
+                                                          int64_t arrangementId,
+                                                          const std::string& arrangementName) {
+    std::string arrFolder = std::to_string(arrangementId);
+    std::string safeName = sanitizeSongTitleForPath(arrangementName);
+    if (!safeName.empty()) {
+        arrFolder += "_" + safeName;
+    }
+    return getSongStorageDir(songId, songTitle) / arrFolder;
+}
+
+fs::path AudioAttachmentService::getArrangementTracksDir(int64_t songId,
+                                                         const std::string& songTitle,
+                                                         int64_t arrangementId,
+                                                         const std::string& arrangementName) {
+    return getArrangementStorageDir(songId, songTitle, arrangementId, arrangementName) / "tracks";
+}
+
 void AudioAttachmentService::removeSongStorage(int64_t songId) {
     auto root = getProjectRoot() / "uploaded_tracks";
     if (!fs::exists(root) || !fs::is_directory(root)) {
@@ -84,6 +103,51 @@ void AudioAttachmentService::removeSongStorage(int64_t songId) {
         if (!entry.is_directory()) continue;
         std::string name = entry.path().filename().string();
         if (name == exactName || name.rfind(prefix, 0) == 0) {
+            fs::remove_all(entry.path(), ec);
+        }
+    }
+}
+
+void AudioAttachmentService::removeArrangementStorage(int64_t songId, int64_t arrangementId) {
+    auto root = getProjectRoot() / "uploaded_tracks";
+    if (!fs::exists(root) || !fs::is_directory(root)) {
+        return;
+    }
+
+    const std::string songExact = std::to_string(songId);
+    const std::string songPrefix = songExact + "_";
+    const std::string arrExact = std::to_string(arrangementId);
+    const std::string arrPrefix = arrExact + "_";
+
+    std::error_code ec;
+    for (const auto& songEntry : fs::directory_iterator(root, ec)) {
+        if (!songEntry.is_directory()) continue;
+        std::string sName = songEntry.path().filename().string();
+        if (sName != songExact && sName.rfind(songPrefix, 0) != 0) continue;
+
+        for (const auto& arrEntry : fs::directory_iterator(songEntry.path(), ec)) {
+            if (!arrEntry.is_directory()) continue;
+            std::string aName = arrEntry.path().filename().string();
+            if (aName == arrExact || aName.rfind(arrPrefix, 0) == 0) {
+                fs::remove_all(arrEntry.path(), ec);
+            }
+        }
+    }
+}
+
+void AudioAttachmentService::cleanupStaleSongDirs(int64_t songId, const std::string& songTitle) {
+    auto destSongDir = getSongStorageDir(songId, songTitle);
+    auto root = getProjectRoot() / "uploaded_tracks";
+    if (!fs::exists(root) || !fs::is_directory(root)) return;
+
+    const std::string exactName = std::to_string(songId);
+    const std::string prefix = exactName + "_";
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(root, ec)) {
+        if (!entry.is_directory()) continue;
+        std::string name = entry.path().filename().string();
+        if ((name == exactName || name.rfind(prefix, 0) == 0) &&
+            entry.path().filename() != destSongDir.filename()) {
             fs::remove_all(entry.path(), ec);
         }
     }
@@ -247,15 +311,64 @@ std::vector<SongTrack> AudioAttachmentService::copyTracksToSongDirectory(int64_t
     }
 
     // Clean up any legacy/renamed storage directories for this song ID (e.g. old "4" or "4_Old_Title")
-    auto root = getProjectRoot() / "uploaded_tracks";
-    const std::string exactName = std::to_string(songId);
-    const std::string prefix = exactName + "_";
-    const std::string canonicalName = destSongDir.filename().string();
+    cleanupStaleSongDirs(songId, songTitle);
 
-    for (const auto& entry : fs::directory_iterator(root, ec)) {
+    return copied;
+}
+
+std::vector<SongTrack> AudioAttachmentService::copyTracksToArrangementDirectory(
+    int64_t songId,
+    const std::string& songTitle,
+    int64_t arrangementId,
+    const std::string& arrangementName,
+    const std::vector<SongTrack>& tracks) {
+    auto destSongDir = getSongStorageDir(songId, songTitle);
+    auto destArrDir = getArrangementStorageDir(songId, songTitle, arrangementId, arrangementName);
+    auto destDir = destArrDir / "tracks";
+    fs::create_directories(destDir);
+
+    std::vector<SongTrack> copied;
+    std::set<std::string> keptFilenames;
+
+    for (const auto& track : tracks) {
+        fs::path src(track.filePath);
+        if (!fs::exists(src) || !fs::is_regular_file(src)) {
+            continue;
+        }
+
+        fs::path dest = destDir / src.filename();
+        std::error_code ec;
+        bool sameFile = fs::exists(dest, ec) && fs::equivalent(src, dest, ec);
+        if (!sameFile) {
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        }
+
+        keptFilenames.insert(dest.filename().string());
+
+        SongTrack updated = track;
+        updated.name = src.stem().string();
+        updated.filePath = fs::absolute(dest).string();
+        copied.push_back(updated);
+    }
+
+    // Remove stale audio files in destDir
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(destDir, ec)) {
+        if (!entry.is_regular_file()) continue;
+        if (isSupportedAudioExtension(entry.path().extension().string()) &&
+            keptFilenames.find(entry.path().filename().string()) == keptFilenames.end()) {
+            fs::remove(entry.path(), ec);
+        }
+    }
+
+    // Clean up any renamed folders for this arrangement ID within destSongDir
+    const std::string arrExact = std::to_string(arrangementId);
+    const std::string arrPrefix = arrExact + "_";
+    for (const auto& entry : fs::directory_iterator(destSongDir, ec)) {
         if (!entry.is_directory()) continue;
         std::string name = entry.path().filename().string();
-        if (name != canonicalName && (name == exactName || name.rfind(prefix, 0) == 0)) {
+        if ((name == arrExact || name.rfind(arrPrefix, 0) == 0) &&
+            entry.path().filename() != destArrDir.filename()) {
             fs::remove_all(entry.path(), ec);
         }
     }

@@ -33,6 +33,15 @@ public:
                                 const std::vector<SongTrack>& tracks,
                                 bool hasLoadedTracks,
                                 const std::vector<SongSection>& sections = {});
+    void syncArrangements(const std::vector<SongArrangement>& arrangements,
+                          std::optional<int64_t> activeArrangementId,
+                          int clickOnlyTempo,
+                          const std::string& clickOnlyKey,
+                          const std::string& clickOnlyTimeSig,
+                          bool clickOnlyEighths,
+                          bool clickOnlySixteenths,
+                          float clickOnlyEighthsGain,
+                          float clickOnlySixteenthsGain);
     void syncClickSubdivisions(std::optional<int64_t> songId,
                                bool enableEighths,
                                bool enableSixteenths,
@@ -41,18 +50,23 @@ public:
     void syncClickAndGuideChannels(int clickChannel, int guideChannel);
 
     void setPlayingState(bool isPlaying, bool isPaused);
+    void setSongNavigationState(bool canGoPrev, bool canGoNext);
 
     // Callbacks
     std::function<void()> onPlayClicked;
     std::function<void()> onPauseClicked;
     std::function<void()> onStopClicked;
+    std::function<void()> onPreviousSongClicked;
+    std::function<void()> onNextSongClicked;
     std::function<void(float)> onMasterGainChanged;
     std::function<void(float)> onClickGainChanged;
     std::function<void(float)> onGuideGainChanged;
     std::function<void(int)> onClickChannelChanged;
     std::function<void(int)> onGuideChannelChanged;
     std::function<void(int64_t, float, int, bool)> onTrackMixChanged;
-    std::function<void(int64_t, bool, bool, float, float)> onSongClickSubdivisionsChanged;
+    std::function<void(int64_t, std::optional<int64_t>, bool, bool, float, float)> onSongClickSubdivisionsChanged;
+    std::function<void(std::optional<int64_t>, int, const std::string&, const std::string&)> onSongParamsChanged;
+    std::function<void(int64_t)> onArrangementChanged;
 
     void resized() override;
     void paint(juce::Graphics& g) override;
@@ -60,18 +74,36 @@ public:
 private:
     AudioEngine& audioEngine_;
 
-    juce::TextButton playPauseButton_{"Play"};
-    juce::TextButton stopButton_{"Stop"};
+    class TransportIconButton;
+    std::unique_ptr<TransportIconButton> prevSongButton_;
+    std::unique_ptr<TransportIconButton> playPauseButton_;
+    std::unique_ptr<TransportIconButton> stopButton_;
+    std::unique_ptr<TransportIconButton> nextSongButton_;
 
     juce::Label songTitleLabel_;
     juce::Label songArtistLabel_;
 
-    juce::Label tempoBadge_;
-    juce::Label keyBadge_;
-    juce::Label timeSigBadge_;
+    juce::TextEditor tempoEditor_;
+    juce::Label bpmSuffixLabel_{{}, "BPM"};
+    juce::Label keyPrefixLabel_{{}, "Key:"};
+    juce::ComboBox keyBox_;
+    juce::ComboBox timeSigBox_;
     juce::ToggleButton useTracksToggle_{"Use tracks"};
+    juce::ComboBox arrangementBox_;
     juce::ToggleButton eighthsToggle_{"8ths"};
     juce::ToggleButton sixteenthsToggle_{"16ths"};
+    int currentTempo_ = 120;
+    std::string currentKey_ = "C";
+    std::string currentTimeSig_ = "4/4";
+    std::vector<SongArrangement> currentArrangements_;
+    std::optional<int64_t> activeArrangementId_;
+    int clickOnlyTempo_ = 120;
+    std::string clickOnlyKey_ = "C";
+    std::string clickOnlyTimeSig_ = "4/4";
+    bool clickOnlyEighths_ = false;
+    bool clickOnlySixteenths_ = false;
+    float clickOnlyEighthsGain_ = 1.0f;
+    float clickOnlySixteenthsGain_ = 1.0f;
 
     juce::Slider masterSlider_;
     juce::Label masterLabel_{{}, "Master"};
@@ -111,6 +143,10 @@ private:
     void rebuildTrackStrips();
     void updateTrackStripsEnabled();
     void notifyClickSubdivisionsChanged();
+    void notifySongParamsChanged();
+    void applyActiveModeSettings();
+    void updateSongParamEditorsEnabled();
+    void commitTempoEditor(bool clampAndFormat);
     void updateSubdivisionFaderVisibility();
     void layoutTrackStrips(int viewportWidth, int viewportHeight);
     void timerCallback() override;

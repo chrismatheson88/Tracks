@@ -130,7 +130,7 @@ private:
 
     std::vector<LoadedTrack> loadedTracks_;
     int64_t maxSongLengthFrames_ = 0;
-    std::optional<int64_t> activeSongId_;
+    std::string activeCacheKey_;
     std::vector<std::string> activeTrackPaths_;
 
     std::atomic<bool> isPlaying_{false};
@@ -158,7 +158,7 @@ private:
     std::mutex cacheMutex_;
     std::condition_variable loaderCv_;
     std::optional<int64_t> cachedSetlistId_;
-    std::unordered_map<int64_t, std::shared_ptr<CachedSongAudio>> songAudioCache_;
+    std::unordered_map<std::string, std::shared_ptr<CachedSongAudio>> songAudioCache_;
     std::deque<Song> preloadQueue_;
     uint64_t preloadGeneration_ = 0;
     bool shuttingDown_ = false;
@@ -181,6 +181,7 @@ private:
     void enqueueSongLoadLocked(const Song& song, bool highPriority);
     void applyCachedAudio(const std::shared_ptr<CachedSongAudio>& cached, const Song* overrideSettings);
     void rebuildWaveformPeaksLocked();
+    static std::string makeCacheKey(const Song& song);
     static std::vector<std::string> extractTrackPaths(const Song& song);
     static std::vector<float> computeWaveformPeaks(const std::vector<LoadedTrack>& tracks, int64_t maxLengthFrames);
     static std::shared_ptr<CachedSongAudio> decodeSongAudio(const Song& song);

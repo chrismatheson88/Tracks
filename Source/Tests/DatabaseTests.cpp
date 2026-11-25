@@ -100,7 +100,8 @@ void runDatabaseTests() {
     // Test 2: Update Song (and verify track replacement)
     std::cout << "[Test] Updating Song..." << std::endl;
     loadedS1->tempo = 75;
-    loadedS1->tracks.pop_back(); // Remove backing track, keep only click
+    assert(loadedS1->arrangements.size() == 1);
+    loadedS1->arrangements[0].tracks.pop_back(); // Remove backing track, keep only click
     tracks::Song updatedS1 = db.saveSong(*loadedS1);
     assert(*updatedS1.id == s1Id);
 
@@ -109,6 +110,99 @@ void runDatabaseTests() {
     assert(reloadedS1->tempo == 75);
     assert(reloadedS1->tracks.size() == 1);
     assert(reloadedS1->tracks[0].name == "Click");
+
+    // Test 2b: Multiple Arrangements per Song (independent tempo, key, time sig, tracks, sections, click subdivisions)
+    std::cout << "[Test] Multiple Arrangements per Song..." << std::endl;
+    tracks::Song multiSong;
+    multiSong.title = "House of the Lord";
+    multiSong.artist = "Phil Wickham";
+    multiSong.tempo = 86;
+    multiSong.key = "Bb";
+    multiSong.timeSignature = "4/4";
+
+    tracks::SongArrangement loudArr;
+    loudArr.name = "Loud Final Chorus";
+    loudArr.tempo = 86;
+    loudArr.key = "Bb";
+    loudArr.timeSignature = "4/4";
+    tracks::SongTrack loudDrums;
+    loudDrums.name = "Drums";
+    loudDrums.filePath = "/tmp/loud_drums.wav";
+    loudDrums.outputChannel = 0;
+    loudDrums.gain = 1.0f;
+    loudDrums.trackKey = "Bb";
+    loudDrums.numChannels = 2;
+    loudDrums.stereoOutput = true;
+    loudArr.tracks.push_back(loudDrums);
+    loudArr.sections.push_back({ std::nullopt, "Intro", 4, 0 });
+    loudArr.sections.push_back({ std::nullopt, "Big Chorus", 8, 1 });
+
+    tracks::SongArrangement quietArr;
+    quietArr.name = "Quiet Final Chorus";
+    quietArr.tempo = 82;
+    quietArr.key = "G";
+    quietArr.timeSignature = "6/8";
+    tracks::SongTrack quietKeys;
+    quietKeys.name = "Keys";
+    quietKeys.filePath = "/tmp/quiet_keys.wav";
+    quietKeys.outputChannel = 0;
+    quietKeys.gain = 0.9f;
+    quietKeys.trackKey = "G";
+    quietKeys.numChannels = 2;
+    quietKeys.stereoOutput = true;
+    quietArr.tracks.push_back(quietKeys);
+    quietArr.sections.push_back({ std::nullopt, "Soft Intro", 2, 0 });
+
+    multiSong.arrangements.push_back(loudArr);
+    multiSong.arrangements.push_back(quietArr);
+
+    auto savedMulti = db.saveSong(multiSong);
+    assert(savedMulti.id.has_value());
+    assert(savedMulti.arrangements.size() == 2);
+    assert(savedMulti.arrangements[0].id.has_value());
+    assert(savedMulti.arrangements[1].id.has_value());
+    int64_t loudId = *savedMulti.arrangements[0].id;
+    int64_t quietId = *savedMulti.arrangements[1].id;
+
+    // Default click subdivisions per arrangement are quarter notes only
+    assert(!savedMulti.arrangements[0].clickEighths && !savedMulti.arrangements[0].clickSixteenths);
+    assert(!savedMulti.arrangements[1].clickEighths && !savedMulti.arrangements[1].clickSixteenths);
+
+    // Update click subdivisions on Quiet Final Chorus only (as remembered from a set)
+    db.updateArrangementClickSubdivisions(quietId, true, false, 0.7f, 1.0f);
+
+    // Save a setlist selecting Quiet Final Chorus and verify arrangementId & metadata persist
+    tracks::Setlist arrSet;
+    arrSet.name = "Evening Acoustic";
+    tracks::SetlistEntry arrEntry;
+    arrEntry.songId = *savedMulti.id;
+    arrEntry.orderIndex = 0;
+    arrEntry.arrangementId = quietId;
+    arrSet.entries.push_back(arrEntry);
+    auto savedArrSet = db.saveSetlist(arrSet);
+    auto loadedArrSet = db.loadSetlist(*savedArrSet.id);
+    assert(loadedArrSet.has_value());
+    assert(loadedArrSet->entries.size() == 1);
+    assert(loadedArrSet->entries[0].arrangementId.value_or(0) == quietId);
+    assert(loadedArrSet->entries[0].getEffectiveTempo() == 82);
+    assert(loadedArrSet->entries[0].getEffectiveKey() == "G");
+    assert(loadedArrSet->entries[0].getEffectiveTimeSignature() == "6/8");
+    const auto* pickedArr = loadedArrSet->entries[0].getSelectedArrangement();
+    assert(pickedArr != nullptr && pickedArr->name == "Quiet Final Chorus");
+    assert(pickedArr->clickEighths == true && pickedArr->clickSixteenths == false);
+    assert(std::abs(pickedArr->clickEighthsGain - 0.7f) < 1e-4f);
+    assert(pickedArr->tracks.size() == 1 && pickedArr->tracks[0].name == "Keys");
+    assert(pickedArr->sections.size() == 1 && pickedArr->sections[0].name == "Soft Intro");
+
+    // Re-saving the song preserves existing arrangement IDs so setlist_items.arrangement_id stays linked
+    auto loadedMulti = db.loadSong(*savedMulti.id);
+    assert(loadedMulti.has_value());
+    loadedMulti->notes = "Updated notes";
+    auto resavedMulti = db.saveSong(*loadedMulti);
+    assert(*resavedMulti.arrangements[0].id == loudId);
+    assert(*resavedMulti.arrangements[1].id == quietId);
+    auto reloadedArrSet = db.loadSetlist(*savedArrSet.id);
+    assert(reloadedArrSet->entries[0].arrangementId.value_or(0) == quietId);
 
     // Test 3: Save and load Setlist with overrides
     std::cout << "[Test] Saving Setlist with overrides..." << std::endl;

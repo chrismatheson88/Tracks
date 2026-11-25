@@ -22,7 +22,17 @@ public:
     static std::string sanitizeSongTitleForPath(const std::string& songTitle);
     static std::filesystem::path getSongStorageDir(int64_t songId, const std::string& songTitle = "");
     static std::filesystem::path getSongTracksDir(int64_t songId, const std::string& songTitle = "");
+    static std::filesystem::path getArrangementStorageDir(int64_t songId,
+                                                          const std::string& songTitle,
+                                                          int64_t arrangementId,
+                                                          const std::string& arrangementName = "");
+    static std::filesystem::path getArrangementTracksDir(int64_t songId,
+                                                         const std::string& songTitle,
+                                                         int64_t arrangementId,
+                                                         const std::string& arrangementName = "");
     static void removeSongStorage(int64_t songId);
+    static void removeArrangementStorage(int64_t songId, int64_t arrangementId);
+    static void cleanupStaleSongDirs(int64_t songId, const std::string& songTitle);
     static void clearSongTrackDirectory(int64_t songId, const std::string& songTitle = "");
 
     static AudioDirectoryInspectionResult inspectAudioDirectory(const std::string& directoryPath);
@@ -30,6 +40,11 @@ public:
     static std::vector<SongTrack> copyTracksToSongDirectory(int64_t songId,
                                                             const std::string& songTitle,
                                                             const std::vector<SongTrack>& tracks);
+    static std::vector<SongTrack> copyTracksToArrangementDirectory(int64_t songId,
+                                                                   const std::string& songTitle,
+                                                                   int64_t arrangementId,
+                                                                   const std::string& arrangementName,
+                                                                   const std::vector<SongTrack>& tracks);
 };
 
 } // namespace tracks

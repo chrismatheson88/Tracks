@@ -125,7 +125,7 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
         selectedEntryIndex_ = -1;
         entryListBox_.updateContent();
         saveCurrentSetlist();
-        updateOverridesUI();
+        notifySongNavigationState();
     };
     addAndMakeVisible(removeSongButton_);
 
@@ -156,47 +156,6 @@ OpenSetView::OpenSetView(DatabaseService& db, AudioEngine& audioEngine)
     };
     addAndMakeVisible(addSongPicker_);
 
-    // Overrides section
-    overridesHeader_.setFont(juce::Font(14.0f, juce::Font::bold));
-    overridesHeader_.setColour(juce::Label::textColourId, AppTheme::textLight);
-    addAndMakeVisible(overridesHeader_);
-
-    auto setupOverride = [this](juce::Label& lbl) {
-        lbl.setFont(juce::Font(11.0f, juce::Font::bold));
-        lbl.setColour(juce::Label::textColourId, AppTheme::textMuted);
-        lbl.setJustificationType(juce::Justification::centredRight);
-        addAndMakeVisible(lbl);
-    };
-
-    setupOverride(overrideTempoLabel_);
-    overrideTempoLabel_.setJustificationType(juce::Justification::centredLeft);
-    overrideTempoEditor_.setJustification(juce::Justification::centredLeft);
-    addAndMakeVisible(overrideTempoEditor_);
-    overrideTempoEditor_.onTextChange = [this]() { applyOverridesFromUI(); };
-
-    setupOverride(overrideKeyLabel_);
-    const char* keys[] = { "", "C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B",
-                           "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
-    int kid = 1;
-    for (const char* k : keys) {
-        overrideKeyBox_.addItem(k[0] == '\0' ? "(Default)" : k, kid++);
-    }
-    overrideKeyBox_.onChange = [this]() { applyOverridesFromUI(); };
-    addAndMakeVisible(overrideKeyBox_);
-
-    setupOverride(overrideTimeSigLabel_);
-    const char* sigs[] = { "", "4/4", "3/4", "6/8", "12/8", "2/4", "5/4", "7/8" };
-    int sid = 1;
-    for (const char* s : sigs) {
-        overrideTimeSigBox_.addItem(s[0] == '\0' ? "(Default)" : s, sid++);
-    }
-    overrideTimeSigBox_.onChange = [this]() { applyOverridesFromUI(); };
-    addAndMakeVisible(overrideTimeSigBox_);
-
-    saveOverrideToLibraryButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
-    saveOverrideToLibraryButton_.onClick = [this]() { saveOverridesToMasterSong(); };
-    addAndMakeVisible(saveOverrideToLibraryButton_);
-
     refreshSetlists();
 }
 
@@ -215,13 +174,61 @@ void OpenSetView::populateAddSongPicker() {
     addSongPicker_.setSelectedId(0, juce::dontSendNotification);
 }
 
+Song OpenSetView::buildEffectiveSongForEntry(const SetlistEntry& entry) const {
+    Song effectiveSong = entry.song.value_or(Song{});
+    const auto* arr = entry.getSelectedArrangement();
+    if (arr != nullptr && !arr->tracks.empty()) {
+        effectiveSong.activeArrangementId = arr->id;
+        effectiveSong.tempo = arr->tempo;
+        effectiveSong.key = arr->key.empty() ? effectiveSong.key : arr->key;
+        effectiveSong.timeSignature = arr->timeSignature.empty() ? effectiveSong.timeSignature : arr->timeSignature;
+        effectiveSong.clickEighths = arr->clickEighths;
+        effectiveSong.clickSixteenths = arr->clickSixteenths;
+        effectiveSong.clickEighthsGain = arr->clickEighthsGain;
+        effectiveSong.clickSixteenthsGain = arr->clickSixteenthsGain;
+        effectiveSong.tracks = arr->tracks;
+        effectiveSong.sections = arr->sections;
+    } else {
+        effectiveSong.activeArrangementId = std::nullopt;
+        effectiveSong.tempo = entry.overrideTempo.value_or(effectiveSong.tempo);
+        effectiveSong.key = entry.overrideKey.value_or(effectiveSong.key);
+        effectiveSong.timeSignature = entry.overrideTimeSignature.value_or(effectiveSong.timeSignature);
+    }
+    return effectiveSong;
+}
+
+std::optional<Song> OpenSetView::getClickOnlyBaselineForCurrentSong() const {
+    if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
+        selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size()))
+        return std::nullopt;
+    const auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
+    if (!entry.song.has_value()) return std::nullopt;
+    Song base = *entry.song;
+    if (entry.overrideTempo.has_value() && *entry.overrideTempo > 0) base.tempo = *entry.overrideTempo;
+    if (entry.overrideKey.has_value() && !entry.overrideKey->empty()) base.key = *entry.overrideKey;
+    if (entry.overrideTimeSignature.has_value() && !entry.overrideTimeSignature->empty()) base.timeSignature = *entry.overrideTimeSignature;
+    return base;
+}
+
 void OpenSetView::preloadCurrentSetlist() {
     if (!isVisible() || !currentSetlist_ || !currentSetlist_->id.has_value()) return;
 
     std::vector<Song> songsInSet;
-    songsInSet.reserve(currentSetlist_->entries.size());
     for (const auto& entry : currentSetlist_->entries) {
-        if (entry.song.has_value()) {
+        if (!entry.song.has_value()) continue;
+        if (!entry.song->arrangements.empty()) {
+            for (const auto& arr : entry.song->arrangements) {
+                if (arr.tracks.empty()) continue;
+                Song s = *entry.song;
+                s.activeArrangementId = arr.id;
+                s.tempo = arr.tempo;
+                s.key = arr.key;
+                s.timeSignature = arr.timeSignature;
+                s.tracks = arr.tracks;
+                s.sections = arr.sections;
+                songsInSet.push_back(std::move(s));
+            }
+        } else if (!entry.song->tracks.empty()) {
             songsInSet.push_back(*entry.song);
         }
     }
@@ -269,7 +276,7 @@ void OpenSetView::refreshSetlists() {
         dateEditor_.setText("", false);
         timeEditor_.setText("", false);
         entryListBox_.updateContent();
-        updateOverridesUI();
+        notifySongNavigationState();
     }
 }
 
@@ -295,24 +302,24 @@ void OpenSetView::loadSetlistToUI(const Setlist& setlist, bool preserveSelection
     if (!preserveSelection || selectedEntryIndex_ >= static_cast<int>(setlist.entries.size())) {
         selectedEntryIndex_ = -1;
     }
+    if (isVisible() && selectedEntryIndex_ < 0 && !setlist.entries.empty()) {
+        selectedEntryIndex_ = 0;
+    }
+
     entryListBox_.updateContent();
-    if (selectedEntryIndex_ >= 0) {
+    if (selectedEntryIndex_ >= 0 && selectedEntryIndex_ < static_cast<int>(setlist.entries.size())) {
         entryListBox_.selectRow(selectedEntryIndex_, false, false);
-        if (preserveSelection && selectedEntryIndex_ < static_cast<int>(setlist.entries.size())) {
+        if (isVisible()) {
             const auto& entry = setlist.entries[static_cast<size_t>(selectedEntryIndex_)];
             if (entry.song.has_value() && onSongSelectedForPlayback) {
-                Song effectiveSong = *entry.song;
-                effectiveSong.tempo = entry.getEffectiveTempo();
-                effectiveSong.key = entry.getEffectiveKey();
-                effectiveSong.timeSignature = entry.getEffectiveTimeSignature();
-                onSongSelectedForPlayback(effectiveSong);
+                onSongSelectedForPlayback(buildEffectiveSongForEntry(entry));
             }
         }
     } else {
         entryListBox_.deselectAllRows();
     }
     entryListBox_.repaint();
-    updateOverridesUI();
+    notifySongNavigationState();
 }
 
 void OpenSetView::saveCurrentSetlist() {
@@ -372,10 +379,16 @@ void OpenSetView::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, 
     const int contentX = 28;
     const int contentW = std::max(0, width - contentX - 8);
 
-    // Title (full top row)
+    // Title (full top row; show arrangement name when song has multiple arrangements)
+    juce::String titleDisplay = songTitle;
+    if (entry.song.has_value() && entry.song->arrangements.size() > 1) {
+        if (const auto* arr = entry.getSelectedArrangement(); arr != nullptr && !arr->name.empty()) {
+            titleDisplay += "  [" + juce::String(arr->name) + "]";
+        }
+    }
     g.setFont(juce::Font(13.0f, juce::Font::bold));
     g.setColour(AppTheme::textLight);
-    g.drawText(songTitle, contentX, 4, contentW, 16, juce::Justification::centredLeft, true);
+    g.drawText(titleDisplay, contentX, 4, contentW, 16, juce::Justification::centredLeft, true);
 
     // Effective settings badge (bottom right)
     juce::String details = juce::String(effTempo) + " BPM | " + juce::String(effKey) + " | " + juce::String(effTimeSig);
@@ -404,101 +417,105 @@ void OpenSetView::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, 
 
 void OpenSetView::selectedRowsChanged(int lastRowSelected) {
     selectedEntryIndex_ = lastRowSelected;
-    updateOverridesUI();
+    notifySongNavigationState();
 
     if (currentSetlist_ && selectedEntryIndex_ >= 0 &&
         selectedEntryIndex_ < static_cast<int>(currentSetlist_->entries.size())) {
         const auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
-        if (entry.song.has_value()) {
-            Song effectiveSong = *entry.song;
-            effectiveSong.tempo = entry.getEffectiveTempo();
-            effectiveSong.key = entry.getEffectiveKey();
-            effectiveSong.timeSignature = entry.getEffectiveTimeSignature();
-            if (onSongSelectedForPlayback) {
-                onSongSelectedForPlayback(effectiveSong);
-            }
+        if (entry.song.has_value() && onSongSelectedForPlayback) {
+            onSongSelectedForPlayback(buildEffectiveSongForEntry(entry));
         }
     }
 }
 
-void OpenSetView::updateOverridesUI() {
-    bool hasSelection = (currentSetlist_ && selectedEntryIndex_ >= 0 &&
-                         selectedEntryIndex_ < static_cast<int>(currentSetlist_->entries.size()));
-
-    overrideTempoEditor_.setEnabled(hasSelection);
-    overrideKeyBox_.setEnabled(hasSelection);
-    overrideTimeSigBox_.setEnabled(hasSelection);
-    saveOverrideToLibraryButton_.setEnabled(hasSelection);
-
-    if (hasSelection) {
-        const auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
-        if (entry.overrideTempo.has_value()) {
-            overrideTempoEditor_.setText(juce::String(*entry.overrideTempo), false);
-        } else {
-            overrideTempoEditor_.setText("", false);
-        }
-
-        if (entry.overrideKey.has_value()) {
-            overrideKeyBox_.setText(*entry.overrideKey, juce::dontSendNotification);
-        } else {
-            overrideKeyBox_.setSelectedId(1, juce::dontSendNotification); // (Default)
-        }
-
-        if (entry.overrideTimeSignature.has_value()) {
-            overrideTimeSigBox_.setText(*entry.overrideTimeSignature, juce::dontSendNotification);
-        } else {
-            overrideTimeSigBox_.setSelectedId(1, juce::dontSendNotification); // (Default)
-        }
-    } else {
-        overrideTempoEditor_.setText("", false);
-        overrideKeyBox_.setSelectedId(1, juce::dontSendNotification);
-        overrideTimeSigBox_.setSelectedId(1, juce::dontSendNotification);
-    }
-}
-
-void OpenSetView::applyOverridesFromUI() {
+void OpenSetView::selectArrangementForCurrentSong(int64_t arrangementId) {
     if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
         selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size()))
         return;
 
     auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
+    if (entry.arrangementId.has_value() && *entry.arrangementId == arrangementId) return;
 
-    auto tempoText = overrideTempoEditor_.getText().trim();
-    if (!tempoText.isEmpty() && tempoText.getIntValue() > 0) {
-        entry.overrideTempo = tempoText.getIntValue();
-    } else {
-        entry.overrideTempo = std::nullopt;
+    const bool wasPlaying = audioEngine_.isPlaying() && !audioEngine_.isPaused();
+    if (audioEngine_.isPlaying()) {
+        audioEngine_.stop();
     }
 
-    auto keyText = overrideKeyBox_.getText();
-    if (!keyText.isEmpty() && keyText != "(Default)") {
-        entry.overrideKey = keyText.toStdString();
-    } else {
-        entry.overrideKey = std::nullopt;
-    }
-
-    auto sigText = overrideTimeSigBox_.getText();
-    if (!sigText.isEmpty() && sigText != "(Default)") {
-        entry.overrideTimeSignature = sigText.toStdString();
-    } else {
-        entry.overrideTimeSignature = std::nullopt;
-    }
-
+    entry.arrangementId = arrangementId;
     saveCurrentSetlist();
     entryListBox_.repaintRow(selectedEntryIndex_);
 
-    if (entry.song.has_value()) {
-        Song effectiveSong = *entry.song;
-        effectiveSong.tempo = entry.getEffectiveTempo();
-        effectiveSong.key = entry.getEffectiveKey();
-        effectiveSong.timeSignature = entry.getEffectiveTimeSignature();
-        if (onSongSelectedForPlayback) {
-            onSongSelectedForPlayback(effectiveSong);
+    if (entry.song.has_value() && onSongSelectedForPlayback) {
+        onSongSelectedForPlayback(buildEffectiveSongForEntry(entry));
+        if (wasPlaying) {
+            audioEngine_.play();
         }
     }
 }
 
+bool OpenSetView::canSelectPreviousSong() const {
+    return currentSetlist_.has_value() && selectedEntryIndex_ > 0 &&
+           selectedEntryIndex_ < static_cast<int>(currentSetlist_->entries.size());
+}
+
+bool OpenSetView::canSelectNextSong() const {
+    if (!currentSetlist_.has_value() || currentSetlist_->entries.empty()) return false;
+    return selectedEntryIndex_ < static_cast<int>(currentSetlist_->entries.size()) - 1;
+}
+
+void OpenSetView::selectPreviousSong() {
+    if (!canSelectPreviousSong()) return;
+    const bool wasPlaying = audioEngine_.isPlaying() && !audioEngine_.isPaused();
+    audioEngine_.stop();
+    entryListBox_.selectRow(selectedEntryIndex_ - 1);
+    if (wasPlaying) {
+        audioEngine_.play();
+    }
+}
+
+void OpenSetView::selectNextSong() {
+    if (!canSelectNextSong()) return;
+    const bool wasPlaying = audioEngine_.isPlaying() && !audioEngine_.isPaused();
+    audioEngine_.stop();
+    int nextRow = (selectedEntryIndex_ < 0) ? 0 : (selectedEntryIndex_ + 1);
+    entryListBox_.selectRow(nextRow);
+    if (wasPlaying) {
+        audioEngine_.play();
+    }
+}
+
+void OpenSetView::notifySongNavigationState() {
+    if (onSongNavigationStateChanged) {
+        onSongNavigationStateChanged(canSelectPreviousSong(), canSelectNextSong());
+    }
+}
+
+void OpenSetView::applySongParameters(int tempo, const std::string& key, const std::string& timeSignature) {
+    if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
+        selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size()))
+        return;
+
+    auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
+    const int clampedTempo = std::clamp(tempo, 20, 300);
+    const std::string cleanKey = key.empty() ? "C" : key;
+    const std::string cleanSig = timeSignature.empty() ? "4/4" : timeSignature;
+
+    if (entry.song.has_value()) {
+        entry.overrideTempo = (clampedTempo == entry.song->tempo) ? std::nullopt : std::optional<int>(clampedTempo);
+        entry.overrideKey = (cleanKey == entry.song->key) ? std::nullopt : std::optional<std::string>(cleanKey);
+        entry.overrideTimeSignature = (cleanSig == entry.song->timeSignature) ? std::nullopt : std::optional<std::string>(cleanSig);
+    } else {
+        entry.overrideTempo = clampedTempo;
+        entry.overrideKey = cleanKey;
+        entry.overrideTimeSignature = cleanSig;
+    }
+
+    saveCurrentSetlist();
+    entryListBox_.repaintRow(selectedEntryIndex_);
+}
+
 void OpenSetView::syncSongClickSubdivisions(int64_t songId,
+                                            std::optional<int64_t> arrangementId,
                                             bool clickEighths,
                                             bool clickSixteenths,
                                             float clickEighthsGain,
@@ -506,33 +523,22 @@ void OpenSetView::syncSongClickSubdivisions(int64_t songId,
     if (!currentSetlist_) return;
     for (auto& entry : currentSetlist_->entries) {
         if (entry.songId == songId && entry.song.has_value()) {
-            entry.song->clickEighths = clickEighths;
-            entry.song->clickSixteenths = clickSixteenths;
-            entry.song->clickEighthsGain = clickEighthsGain;
-            entry.song->clickSixteenthsGain = clickSixteenthsGain;
+            if (arrangementId.has_value()) {
+                for (auto& arr : entry.song->arrangements) {
+                    if (arr.id.has_value() && *arr.id == *arrangementId) {
+                        arr.clickEighths = clickEighths;
+                        arr.clickSixteenths = clickSixteenths;
+                        arr.clickEighthsGain = clickEighthsGain;
+                        arr.clickSixteenthsGain = clickSixteenthsGain;
+                    }
+                }
+            } else {
+                entry.song->clickEighths = clickEighths;
+                entry.song->clickSixteenths = clickSixteenths;
+                entry.song->clickEighthsGain = clickEighthsGain;
+                entry.song->clickSixteenthsGain = clickSixteenthsGain;
+            }
         }
-    }
-}
-
-void OpenSetView::saveOverridesToMasterSong() {
-    if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
-        selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size()))
-        return;
-
-    auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
-    if (entry.song.has_value() && entry.song->id.has_value()) {
-        Song master = *entry.song;
-        master.tempo = entry.getEffectiveTempo();
-        master.key = entry.getEffectiveKey();
-        master.timeSignature = entry.getEffectiveTimeSignature();
-        db_.saveSong(master);
-        entry.song = master;
-        entry.overrideTempo = std::nullopt;
-        entry.overrideKey = std::nullopt;
-        entry.overrideTimeSignature = std::nullopt;
-        saveCurrentSetlist();
-        updateOverridesUI();
-        entryListBox_.repaintRow(selectedEntryIndex_);
     }
 }
 
@@ -598,29 +604,8 @@ void OpenSetView::resized() {
     leftArea.removeFromBottom(10);
     entryListBox_.setBounds(leftArea);
 
-    // Right Area: Current Song settings laid out in a row
-    auto rightArea = area;
-
-    overridesHeader_.setBounds(rightArea.removeFromTop(24));
-    rightArea.removeFromTop(8);
-
-    auto settingsRow = rightArea.removeFromTop(28);
-    overrideTempoLabel_.setBounds(settingsRow.removeFromLeft(48));
-    overrideTempoEditor_.setBounds(settingsRow.removeFromLeft(64));
-    settingsRow.removeFromLeft(12);
-
-    overrideKeyLabel_.setBounds(settingsRow.removeFromLeft(36));
-    overrideKeyBox_.setBounds(settingsRow.removeFromLeft(96));
-    settingsRow.removeFromLeft(12);
-
-    overrideTimeSigLabel_.setBounds(settingsRow.removeFromLeft(102));
-    overrideTimeSigBox_.setBounds(settingsRow.removeFromLeft(96));
-    settingsRow.removeFromLeft(14);
-
-    saveOverrideToLibraryButton_.setBounds(settingsRow.removeFromLeft(84));
-
-    rightArea.removeFromTop(16);
-    transportArea_ = rightArea;
+    // Right Area: Full-height playback & mixer panel
+    transportArea_ = area;
 }
 
 void OpenSetView::showCalendarPopup() {

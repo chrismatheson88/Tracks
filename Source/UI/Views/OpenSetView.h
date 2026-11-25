@@ -15,13 +15,22 @@ public:
 
     void refreshSetlists();
     void selectSetlist(int64_t setId);
+    void selectPreviousSong();
+    void selectNextSong();
+    bool canSelectPreviousSong() const;
+    bool canSelectNextSong() const;
+    void selectArrangementForCurrentSong(int64_t arrangementId);
+    void applySongParameters(int tempo, const std::string& key, const std::string& timeSignature);
     void syncSongClickSubdivisions(int64_t songId,
+                                   std::optional<int64_t> arrangementId,
                                    bool clickEighths,
                                    bool clickSixteenths,
                                    float clickEighthsGain,
                                    float clickSixteenthsGain);
+    std::optional<Song> getClickOnlyBaselineForCurrentSong() const;
 
     std::function<void(const Song&)> onSongSelectedForPlayback;
+    std::function<void(bool, bool)> onSongNavigationStateChanged;
 
     // ListBoxModel
     int getNumRows() override;
@@ -59,27 +68,13 @@ private:
     juce::TextButton removeSongButton_{"Remove"};
 
     juce::ComboBox addSongPicker_;
-
-    // Current song overrides section
-    juce::Label overridesHeader_{{}, "Current Song"};
-    juce::Label overrideTempoLabel_{{}, "Tempo:"};
-    juce::TextEditor overrideTempoEditor_;
-
-    juce::Label overrideKeyLabel_{{}, "Key:"};
-    juce::ComboBox overrideKeyBox_;
-
-    juce::Label overrideTimeSigLabel_{{}, "Time Signature:"};
-    juce::ComboBox overrideTimeSigBox_;
-
-    juce::TextButton saveOverrideToLibraryButton_{"Save"};
     juce::Rectangle<int> transportArea_;
 
     void loadSetlistToUI(const Setlist& setlist, bool preserveSelection = false);
+    Song buildEffectiveSongForEntry(const SetlistEntry& entry) const;
     void preloadCurrentSetlist();
     void saveCurrentSetlist();
-    void updateOverridesUI();
-    void applyOverridesFromUI();
-    void saveOverridesToMasterSong();
+    void notifySongNavigationState();
     void populateAddSongPicker();
     void showCalendarPopup();
     void showTimePopup();

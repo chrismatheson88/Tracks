@@ -33,7 +33,13 @@ public:
                                      bool clickSixteenths,
                                      float clickEighthsGain,
                                      float clickSixteenthsGain);
+    void updateArrangementClickSubdivisions(int64_t arrangementId,
+                                            bool clickEighths,
+                                            bool clickSixteenths,
+                                            float clickEighthsGain,
+                                            float clickSixteenthsGain);
     void saveSongSections(int64_t songId, std::vector<SongSection>& sections);
+    void saveArrangementSections(int64_t songId, int64_t arrangementId, std::vector<SongSection>& sections);
     void deleteSong(int64_t songId);
 
     // Setlists

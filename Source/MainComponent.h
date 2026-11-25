@@ -32,6 +32,8 @@ private:
     std::unique_ptr<AudioEngine> audioEngine_;
 
     // Top Navigation Bar
+    juce::Image brandIcon_;
+    juce::Rectangle<int> brandIconBounds_;
     juce::Label brandLabel_{{}, "TRACKS"};
     juce::TextButton navLibraryButton_{"Library"};
     juce::TextButton navOpenSetButton_{"Open Set"};
