@@ -18,10 +18,13 @@ public:
 
     void prepare(double sampleRate);
     void reset();
+    void jumpToFrame(int64_t newFrame);
 
     void setTempo(int tempo);
     void setTimeSignature(const std::string& timeSignature);
     void setSections(const std::vector<SongSection>& sections);
+    void setQueuedAnnouncementOverride(int cueBar, const std::string& normalizedKey);
+    void clearQueuedAnnouncementOverride();
     void setUseSectionCountIn(bool enabled);
     bool hasLeadingCountSection() const { return leadingCountBars_ > 0; }
     int getLeadingCountBars() const { return leadingCountBars_; }
@@ -95,6 +98,8 @@ private:
     };
     std::vector<CountWindow> sectionCountWindows_;
     std::vector<SectionAnnouncement> sectionAnnouncements_;
+    int overrideAnnouncementBar_ = -1;
+    std::string overrideAnnouncementKey_;
     bool useSectionCountIn_ = false;
     int leadingCountBars_ = 0;
 

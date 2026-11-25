@@ -1,7 +1,11 @@
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "../Audio/Metronome.h"
+#include "../Audio/PitchShiftUtils.h"
+#include "../Audio/SectionJumpUtils.h"
+#include "../Models/AvailableSections.h"
 #include "../Services/AudioAttachmentService.h"
+#include <signalsmith-stretch.h>
 #include <cassert>
 #include <iostream>
 #include <cmath>
@@ -308,6 +312,32 @@ void testSongStorageDirNaming() {
         assert(!insp.error.has_value());
         assert(!insp.tracks.empty());
         assert(insp.tracks[0].numChannels == 2);
+
+        // Verify AvailableSections covers "Count" and every playback_female section cue file
+        assert(tracks::isAvailableSectionName("Count"));
+        assert(tracks::isAvailableSectionName("count"));
+        assert(!tracks::isAvailableSectionName("Nonexistent Custom Section"));
+        int sectionCueFiles = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(m4aDir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string stem = entry.path().stem().string();
+            if (stem.find("section-") != std::string::npos) {
+                auto dash = stem.rfind('-');
+                std::string secName = (dash != std::string::npos) ? stem.substr(dash + 1) : stem;
+                assert(tracks::isAvailableSectionName(secName));
+                ++sectionCueFiles;
+            }
+        }
+        assert(static_cast<int>(tracks::getAvailableSections().size()) == sectionCueFiles + 1);
+
+        // Verify filterAvailableSections prefix ranking & multi-token filtering
+        assert(tracks::findCanonicalSectionName("pre-chorus 2") == "Pre Chorus 2");
+        assert(tracks::findCanonicalSectionName("count") == "Count");
+        auto chFiltered = tracks::filterAvailableSections("ch");
+        assert(!chFiltered.empty() && chFiltered[0] == "Chorus");
+        auto vamp1Filtered = tracks::filterAvailableSections("vamp 1");
+        assert(!vamp1Filtered.empty());
+        assert(tracks::filterAvailableSections("zzzzzz").empty());
     }
 
     // Verify restructured click packs have accent, quarter, eighth, and sixteenth audio files
@@ -322,11 +352,290 @@ void testSongStorageDirNaming() {
     }
 }
 
+void testPitchShiftLogic() {
+    std::cout << "[Test] Pitch shift semitone math, Drum/FX exclusions, and Signalsmith Stretch alignment..." << std::endl;
+
+    // 1. Key-to-semitone shortest interval wrapping
+    assert(tracks::computeSemitoneShift("C", "C") == 0);
+    assert(tracks::computeSemitoneShift("C", "D") == 2);
+    assert(tracks::computeSemitoneShift("C", "B") == -1);
+    assert(tracks::computeSemitoneShift("Bb", "C") == 2);
+    assert(tracks::computeSemitoneShift("C#", "Db") == 0);
+    assert(tracks::computeSemitoneShift("G", "Bb") == 3);
+    assert(tracks::computeSemitoneShift("Am", "Cm") == 3);
+    assert(tracks::computeSemitoneShift("F#", "E") == -2);
+
+    // 1b. Major vs Minor key detection
+    assert(!tracks::isMinorKey("C"));
+    assert(!tracks::isMinorKey("Bb"));
+    assert(!tracks::isMinorKey("F#"));
+    assert(!tracks::isMinorKey("C maj"));
+    assert(tracks::isMinorKey("Am"));
+    assert(tracks::isMinorKey("Bbm"));
+    assert(tracks::isMinorKey("F#m"));
+    assert(tracks::isMinorKey("Ebm"));
+    assert(tracks::isMinorKey("G minor"));
+
+    // 2. Drum & FX channel exclusion checks
+    assert(tracks::shouldExcludeFromPitchShift("Drums"));
+    assert(tracks::shouldExcludeFromPitchShift("Live Drums"));
+    assert(tracks::shouldExcludeFromPitchShift("Drum Loop"));
+    assert(tracks::shouldExcludeFromPitchShift("Kick"));
+    assert(tracks::shouldExcludeFromPitchShift("Snare"));
+    assert(tracks::shouldExcludeFromPitchShift("Hi-Hat"));
+    assert(tracks::shouldExcludeFromPitchShift("Overheads"));
+    assert(tracks::shouldExcludeFromPitchShift("OH L"));
+    assert(tracks::shouldExcludeFromPitchShift("Percussion"));
+    assert(tracks::shouldExcludeFromPitchShift("Shaker"));
+    assert(tracks::shouldExcludeFromPitchShift("Tambourine"));
+    assert(tracks::shouldExcludeFromPitchShift("Claps"));
+    assert(tracks::shouldExcludeFromPitchShift("FX"));
+    assert(tracks::shouldExcludeFromPitchShift("FX 1"));
+    assert(tracks::shouldExcludeFromPitchShift("FX1"));
+    assert(tracks::shouldExcludeFromPitchShift("SFX"));
+    assert(tracks::shouldExcludeFromPitchShift("Synth FX"));
+    assert(tracks::shouldExcludeFromPitchShift("Vocal Effects"));
+    assert(tracks::shouldExcludeFromPitchShift("Riser"));
+    assert(tracks::shouldExcludeFromPitchShift("Click"));
+    assert(tracks::shouldExcludeFromPitchShift("Guide"));
+
+    // Harmonic / melodic stems MUST NOT be excluded
+    assert(!tracks::shouldExcludeFromPitchShift("Piano"));
+    assert(!tracks::shouldExcludeFromPitchShift("Keys"));
+    assert(!tracks::shouldExcludeFromPitchShift("Acoustic Guitar"));
+    assert(!tracks::shouldExcludeFromPitchShift("EG 1"));
+    assert(!tracks::shouldExcludeFromPitchShift("Bass"));
+    assert(!tracks::shouldExcludeFromPitchShift("Sub Bass"));
+    assert(!tracks::shouldExcludeFromPitchShift("Synth"));
+    assert(!tracks::shouldExcludeFromPitchShift("Pad"));
+    assert(!tracks::shouldExcludeFromPitchShift("Organ"));
+    assert(!tracks::shouldExcludeFromPitchShift("Strings"));
+    assert(!tracks::shouldExcludeFromPitchShift("BGV"));
+
+    // 3. Signalsmith Stretch latency-compensated alignment & pitch shift verification
+    constexpr float kSampleRate = 44100.0f;
+    constexpr int kTotalSamples = 22050; // 0.5s
+    constexpr int kImpulsePos = 10000;
+
+    signalsmith::stretch::SignalsmithStretch<float> stretch;
+    stretch.presetDefault(1, kSampleRate);
+    stretch.setTransposeSemitones(0.0f);
+
+    const int totalLat = stretch.inputLatency() + stretch.outputLatency();
+    std::vector<float> input(kTotalSamples + totalLat + 512, 0.0f);
+    input[kImpulsePos] = 1.0f;
+
+    // Prime with [0 .. totalLat - 1]
+    std::vector<float> primeOut(static_cast<size_t>(totalLat), 0.0f);
+    float* pIn[1] = { input.data() };
+    float* pOut[1] = { primeOut.data() };
+    stretch.process(pIn, totalLat, pOut, totalLat);
+
+    // Process in 512-sample blocks feeding from [pos + totalLat]
+    std::vector<float> output(kTotalSamples, 0.0f);
+    for (int pos = 0; pos < kTotalSamples; pos += 512) {
+        int n = std::min(512, kTotalSamples - pos);
+        float* inPtr[1] = { input.data() + pos + totalLat };
+        float* outPtr[1] = { output.data() + pos };
+        stretch.process(inPtr, n, outPtr, n);
+    }
+
+    int peakIdx = 0;
+    float peakVal = 0.0f;
+    for (int i = 0; i < kTotalSamples; ++i) {
+        if (std::abs(output[i]) > peakVal) {
+            peakVal = std::abs(output[i]);
+            peakIdx = i;
+        }
+    }
+    // Verify impulse stays sample-aligned with drums/click (zero ~50ms lag)
+    assert(peakVal > 0.4f);
+    assert(std::abs(peakIdx - kImpulsePos) <= 128);
+
+    // Verify +12 semitones doubles a 440 Hz sine wave to ~880 Hz (via zero-crossing count)
+    stretch.reset();
+    stretch.setTransposeSemitones(12.0f);
+    std::vector<float> sineIn(kTotalSamples + totalLat + 512, 0.0f);
+    for (size_t i = 0; i < sineIn.size(); ++i) {
+        sineIn[i] = 0.5f * std::sin(2.0f * 3.14159265f * 440.0f * static_cast<float>(i) / kSampleRate);
+    }
+    pIn[0] = sineIn.data();
+    stretch.process(pIn, totalLat, pOut, totalLat);
+    std::vector<float> sineOut(kTotalSamples, 0.0f);
+    for (int pos = 0; pos < kTotalSamples; pos += 512) {
+        int n = std::min(512, kTotalSamples - pos);
+        float* inPtr[1] = { sineIn.data() + pos + totalLat };
+        float* outPtr[1] = { sineOut.data() + pos };
+        stretch.process(inPtr, n, outPtr, n);
+    }
+    int crossings = 0;
+    for (int i = 4000; i < 18000; ++i) {
+        if (sineOut[i - 1] <= 0.0f && sineOut[i] > 0.0f) ++crossings;
+    }
+    double measuredHz = static_cast<double>(crossings) * kSampleRate / 14000.0;
+    assert(std::abs(measuredHz - 880.0) < 35.0);
+}
+
+void testQueuedSectionSkipLogic() {
+    std::cout << "[Test] Queued Section Skip Navigation & Metronome Jump..." << std::endl;
+
+    // 1. Empty sections -> does nothing
+    {
+        auto emptySpans = tracks::buildSectionSpans({}, false);
+        auto ctx = tracks::computeSectionContext(emptySpans, 2);
+        assert(!tracks::canSkipSectionInDirection(0, ctx, -1, -1));
+        assert(!tracks::canSkipSectionInDirection(0, ctx, -1, 1));
+        assert(tracks::computeNextQueuedSection(0, ctx, -1, -1) == -1);
+        assert(tracks::computeNextQueuedSection(0, ctx, -1, 1) == -1);
+    }
+
+    // 2. Multi-section song without leading "count" section (2-bar prepended count-in)
+    std::vector<tracks::SongSection> sections = {
+        { std::nullopt, "Intro", 4, 0 },    // bars [2, 6)
+        { std::nullopt, "Verse 1", 8, 1 },  // bars [6, 14)
+        { std::nullopt, "Chorus 1", 8, 2 }, // bars [14, 22)
+        { std::nullopt, "Verse 2", 8, 3 },  // bars [22, 30)
+        { std::nullopt, "Chorus 2", 8, 4 }, // bars [30, 38)
+        { std::nullopt, "Outro", 4, 5 }     // bars [38, 42)
+    };
+    const int n = static_cast<int>(sections.size());
+    auto spans = tracks::buildSectionSpans(sections, false);
+    assert(spans.size() == 6);
+    assert(spans[0].startBar == 2 && spans[0].endBar == 6);
+    assert(spans[1].startBar == 6 && spans[1].endBar == 14);
+    assert(spans[5].startBar == 38 && spans[5].endBar == 42);
+
+    // Currently in Verse 1 (bar 8): naturalNext = Chorus 1 (2), boundaryBar = 14
+    auto ctxV1 = tracks::computeSectionContext(spans, 8);
+    assert(ctxV1.currentSectionIndex == 1);
+    assert(ctxV1.naturalNextIndex == 2);
+    assert(ctxV1.boundaryBar == 14);
+
+    // Skip forward multiple sections: Chorus 1 (natural) -> Verse 2 (3) -> Chorus 2 (4) -> Outro (5) -> clamped at 5
+    int q = -1;
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, 1);
+    assert(q == 3); // Skips Chorus 1 -> Verse 2
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, 1);
+    assert(q == 4); // Chorus 2
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, 1);
+    assert(q == 5); // Outro
+    assert(!tracks::canSkipSectionInDirection(n, ctxV1, q, 1));
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, 1);
+    assert(q == 5); // Still Outro
+
+    // Skip back through queued sections back to naturalNext (clears queue), then repeat current & go to Intro
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, -1);
+    assert(q == 4); // Chorus 2
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, -1);
+    assert(q == 3); // Verse 2
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, -1);
+    assert(q == -1); // Back to naturalNext (Chorus 1) -> clears queue!
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, -1);
+    assert(q == 1); // Repeat current section (Verse 1)!
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, -1);
+    assert(q == 0); // Intro
+    assert(!tracks::canSkipSectionInDirection(n, ctxV1, q, -1));
+    q = tracks::computeNextQueuedSection(n, ctxV1, q, -1);
+    assert(q == 0); // Clamped at Intro
+
+    // In Outro (last section, bar 39): naturalNext = 6 (song end)
+    auto ctxOutro = tracks::computeSectionContext(spans, 39);
+    assert(ctxOutro.currentSectionIndex == 5);
+    assert(ctxOutro.naturalNextIndex == 6);
+    assert(ctxOutro.boundaryBar == 42);
+    assert(!tracks::canSkipSectionInDirection(n, ctxOutro, -1, 1));
+    assert(tracks::canSkipSectionInDirection(n, ctxOutro, -1, -1));
+    int qOutro = tracks::computeNextQueuedSection(n, ctxOutro, -1, -1);
+    assert(qOutro == 5); // Repeat Outro
+    qOutro = tracks::computeNextQueuedSection(n, ctxOutro, qOutro, -1);
+    assert(qOutro == 4); // Go back to Chorus 2
+    qOutro = tracks::computeNextQueuedSection(n, ctxOutro, qOutro, 1);
+    assert(qOutro == 5); // Back to Outro
+    qOutro = tracks::computeNextQueuedSection(n, ctxOutro, qOutro, 1);
+    assert(qOutro == -1); // Back to natural song end (clears queue)
+
+    // In prepended 2-bar count-in (bar 0): naturalNext = 0 (Intro)
+    auto ctxCount = tracks::computeSectionContext(spans, 0);
+    assert(ctxCount.currentSectionIndex == -1);
+    assert(ctxCount.naturalNextIndex == 0);
+    assert(ctxCount.boundaryBar == 2);
+    assert(!tracks::canSkipSectionInDirection(n, ctxCount, -1, -1));
+    assert(tracks::computeNextQueuedSection(n, ctxCount, -1, 1) == 1); // Skip Intro -> Verse 1
+    assert(!tracks::canRepeatCurrentSection(n, ctxCount));
+    assert(tracks::computeToggleRepeatCurrentSection(n, ctxCount, -1) == -1);
+
+    // Repeat current section toggle: activate -> cancel -> activate while another section was queued
+    assert(tracks::canRepeatCurrentSection(n, ctxV1));
+    int rep = tracks::computeToggleRepeatCurrentSection(n, ctxV1, -1);
+    assert(rep == 1); // Activates repeat of Verse 1
+    rep = tracks::computeToggleRepeatCurrentSection(n, ctxV1, rep);
+    assert(rep == -1); // Clicking again cancels
+    rep = tracks::computeToggleRepeatCurrentSection(n, ctxV1, 4);
+    assert(rep == 1); // Overrides queued Chorus 2 with repeat of Verse 1
+    assert(tracks::canRepeatCurrentSection(n, ctxOutro));
+    assert(tracks::computeToggleRepeatCurrentSection(n, ctxOutro, -1) == 5); // Repeats Outro
+    assert(tracks::computeToggleRepeatCurrentSection(n, ctxOutro, 5) == -1); // Cancels Outro repeat
+
+    // 3. Metronome queued announcement override & jumpToFrame continuity
+    tracks::Metronome met;
+    met.prepare(44100.0);
+    met.setTempo(120);
+    met.setTimeSignature("4/4");
+    met.setUseSectionCountIn(true);
+    met.setSections(sections);
+
+    // Normally bar 13 (last bar of Verse 1) announces Chorus 1
+    assert(met.getScheduledGuideCueForBeat(13, 0) == "section:chorus 1");
+    // Override bar 13 to announce Chorus 2 instead
+    met.setQueuedAnnouncementOverride(13, "chorus 2");
+    assert(met.getScheduledGuideCueForBeat(13, 0) == "section:chorus 2");
+    assert(met.getScheduledGuideCueForBeat(13, 1) == "two");
+    assert(met.getScheduledGuideCueForBeat(13, 2) == "three");
+    assert(met.getScheduledGuideCueForBeat(13, 3) == "four");
+    met.clearQueuedAnnouncementOverride();
+    assert(met.getScheduledGuideCueForBeat(13, 0) == "section:chorus 1");
+
+    // Verify jumpToFrame preserves ringing active sample tails across the jump without cutting off
+    auto makeTailSample = [](int len, float amp) {
+        juce::AudioBuffer<float> b(1, len);
+        for (int i = 0; i < len; ++i) b.setSample(0, i, amp);
+        return b;
+    };
+    met.reset();
+    met.setClickChannel(0);
+    met.setGuideChannel(1);
+    met.setClickGain(0.0f);
+    met.setGuideGain(1.0f);
+    met.loadVoiceWord("one", makeTailSample(100, 0.5f));
+
+    // Render 40 samples (60 samples of "one" still ringing)
+    juce::AudioBuffer<float> preJump(2, 40);
+    preJump.clear();
+    met.renderBlock(preJump, 0, 40);
+    assert(std::abs(preJump.getSample(1, 0) - 0.5f) < 1e-5f);
+
+    // Jump to bar 30 (Chorus 2 start)
+    const int64_t barFrames = met.getFramesPerBar();
+    met.jumpToFrame(30 * barFrames);
+    assert(met.getMetronomeFrame() == 30 * barFrames);
+    assert(met.getCurrentBar() == 30);
+
+    // Next 60 samples should still contain the ringing tail of "one", then drop to 0
+    juce::AudioBuffer<float> postJump(2, 80);
+    postJump.clear();
+    met.renderBlock(postJump, 0, 80);
+    assert(std::abs(postJump.getSample(1, 0) - 0.5f) < 1e-5f);
+    assert(std::abs(postJump.getSample(1, 59) - 0.5f) < 1e-5f);
+    assert(std::abs(postJump.getSample(1, 60) - 0.0f) < 1e-5f);
+}
+
 int main() {
     try {
         testMetronomeCalculations();
         testStereoRoutingLogic();
         testSongStorageDirNaming();
+        testPitchShiftLogic();
+        testQueuedSectionSkipLogic();
         std::cout << "[Test] All AudioEngine tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {

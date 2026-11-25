@@ -76,8 +76,11 @@ private:
 
     class TransportIconButton;
     std::unique_ptr<TransportIconButton> prevSongButton_;
+    std::unique_ptr<TransportIconButton> skipBackButton_;
     std::unique_ptr<TransportIconButton> playPauseButton_;
     std::unique_ptr<TransportIconButton> stopButton_;
+    std::unique_ptr<TransportIconButton> repeatSectionButton_;
+    std::unique_ptr<TransportIconButton> skipForwardButton_;
     std::unique_ptr<TransportIconButton> nextSongButton_;
 
     juce::Label songTitleLabel_;
@@ -97,6 +100,7 @@ private:
     std::string currentTimeSig_ = "4/4";
     std::vector<SongArrangement> currentArrangements_;
     std::optional<int64_t> activeArrangementId_;
+    std::string arrangementTargetKey_;
     int clickOnlyTempo_ = 120;
     std::string clickOnlyKey_ = "C";
     std::string clickOnlyTimeSig_ = "4/4";
@@ -127,6 +131,9 @@ private:
     std::unique_ptr<juce::Component> trackStripsContainer_;
     std::vector<std::unique_ptr<TrackStripComponent>> trackStrips_;
     std::vector<SongTrack> currentTracks_;
+    std::vector<SongSection> currentSections_;
+    std::vector<SectionSpan> currentSectionSpans_;
+    bool lastSectionLeadingCount_ = false;
 
     BeatPlayheadComponent beatPlayhead_;
     OutputMeterComponent outputMeter_;
@@ -145,7 +152,9 @@ private:
     void notifyClickSubdivisionsChanged();
     void notifySongParamsChanged();
     void applyActiveModeSettings();
+    void populateKeyBoxOptions(bool filterByTrackKey, const std::string& trackSourceKey);
     void updateSongParamEditorsEnabled();
+    void applyCurrentKeyPitchShift();
     void commitTempoEditor(bool clampAndFormat);
     void updateSubdivisionFaderVisibility();
     void layoutTrackStrips(int viewportWidth, int viewportHeight);

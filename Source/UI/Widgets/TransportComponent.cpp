@@ -188,7 +188,7 @@ private:
 
 class TransportComponent::TransportIconButton : public juce::Button {
 public:
-    enum class IconType { Previous, Play, Pause, Stop, Next };
+    enum class IconType { Previous, SkipBack, Play, Pause, Stop, Repeat, SkipForward, Next };
 
     TransportIconButton(const juce::String& name, IconType type, juce::Colour baseColour)
         : juce::Button(name), iconType_(type), baseColour_(baseColour) {
@@ -209,6 +209,13 @@ public:
         }
     }
 
+    void setActiveHighlight(bool active) {
+        if (activeHighlight_ != active) {
+            activeHighlight_ = active;
+            repaint();
+        }
+    }
+
     void paintButton(juce::Graphics& g, bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override {
         auto bounds = getLocalBounds().toFloat().reduced(0.5f);
         const bool enabled = isEnabled();
@@ -225,15 +232,21 @@ public:
         g.setColour(bg);
         g.fillRoundedRectangle(bounds, 5.0f);
 
-        g.setColour(enabled ? AppTheme::borderCol.brighter(0.1f) : AppTheme::borderCol.withAlpha(0.45f));
-        g.drawRoundedRectangle(bounds, 5.0f, 1.0f);
+        if (enabled && activeHighlight_) {
+            g.setColour(juce::Colour(0xff38bdf8));
+            g.drawRoundedRectangle(bounds.reduced(0.5f), 5.0f, 1.6f);
+        } else {
+            g.setColour(enabled ? AppTheme::borderCol.brighter(0.1f) : AppTheme::borderCol.withAlpha(0.45f));
+            g.drawRoundedRectangle(bounds, 5.0f, 1.0f);
+        }
 
         const float cx = bounds.getCentreX();
         const float cy = bounds.getCentreY();
         const float iconH = std::min(14.0f, bounds.getHeight() * 0.44f);
         const float halfH = iconH * 0.5f;
 
-        g.setColour(enabled ? AppTheme::textLight : AppTheme::textMuted.withAlpha(0.45f));
+        g.setColour(enabled ? (activeHighlight_ ? juce::Colours::white : AppTheme::textLight)
+                            : AppTheme::textMuted.withAlpha(0.45f));
 
         switch (iconType_) {
             case IconType::Play: {
@@ -257,6 +270,43 @@ public:
                 g.fillRoundedRectangle(cx - sq * 0.5f, cy - sq * 0.5f, sq, sq, 2.0f);
                 break;
             }
+            case IconType::Repeat: {
+                // Classic rounded loop icon: top arrow pointing right, bottom arrow pointing left
+                const float halfW = iconH * 0.62f;
+                const float yTop = cy - halfH * 0.62f;
+                const float yBot = cy + halfH * 0.62f;
+                const float xLeft = cx - halfW;
+                const float xRight = cx + halfW;
+                const float r = 3.0f;
+                const float ah = 3.4f;
+
+                juce::Path topArc;
+                topArc.startNewSubPath(xLeft, cy - 0.5f);
+                topArc.lineTo(xLeft, yTop + r);
+                topArc.quadraticTo(xLeft, yTop, xLeft + r, yTop);
+                topArc.lineTo(xRight - ah * 0.6f, yTop);
+                g.strokePath(topArc, juce::PathStrokeType(1.85f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                juce::Path topHead;
+                topHead.addTriangle(xRight - ah, yTop - ah * 0.8f,
+                                    xRight - ah, yTop + ah * 0.8f,
+                                    xRight + 1.0f, yTop);
+                g.fillPath(topHead);
+
+                juce::Path botArc;
+                botArc.startNewSubPath(xRight, cy + 0.5f);
+                botArc.lineTo(xRight, yBot - r);
+                botArc.quadraticTo(xRight, yBot, xRight - r, yBot);
+                botArc.lineTo(xLeft + ah * 0.6f, yBot);
+                g.strokePath(botArc, juce::PathStrokeType(1.85f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                juce::Path botHead;
+                botHead.addTriangle(xLeft + ah, yBot - ah * 0.8f,
+                                    xLeft + ah, yBot + ah * 0.8f,
+                                    xLeft - 1.0f, yBot);
+                g.fillPath(botHead);
+                break;
+            }
             case IconType::Previous: {
                 const float barW = 2.8f;
                 const float triW = iconH * 0.72f;
@@ -267,6 +317,34 @@ public:
                 juce::Path p;
                 p.addTriangle(triLeft, cy, triLeft + triW, cy - halfH, triLeft + triW, cy + halfH);
                 g.fillPath(p.createPathWithRoundedCorners(1.2f));
+                break;
+            }
+            case IconType::SkipBack: {
+                const float triW = iconH * 0.62f;
+                const float overlap = 1.0f;
+                const float totalW = triW * 2.0f - overlap;
+                const float leftX = cx - totalW * 0.5f;
+                juce::Path p1;
+                p1.addTriangle(leftX, cy, leftX + triW, cy - halfH, leftX + triW, cy + halfH);
+                g.fillPath(p1.createPathWithRoundedCorners(1.0f));
+                const float secondX = leftX + triW - overlap;
+                juce::Path p2;
+                p2.addTriangle(secondX, cy, secondX + triW, cy - halfH, secondX + triW, cy + halfH);
+                g.fillPath(p2.createPathWithRoundedCorners(1.0f));
+                break;
+            }
+            case IconType::SkipForward: {
+                const float triW = iconH * 0.62f;
+                const float overlap = 1.0f;
+                const float totalW = triW * 2.0f - overlap;
+                const float leftX = cx - totalW * 0.5f;
+                juce::Path p1;
+                p1.addTriangle(leftX, cy - halfH, leftX, cy + halfH, leftX + triW, cy);
+                g.fillPath(p1.createPathWithRoundedCorners(1.0f));
+                const float secondX = leftX + triW - overlap;
+                juce::Path p2;
+                p2.addTriangle(secondX, cy - halfH, secondX, cy + halfH, secondX + triW, cy);
+                g.fillPath(p2.createPathWithRoundedCorners(1.0f));
                 break;
             }
             case IconType::Next: {
@@ -286,6 +364,7 @@ public:
 private:
     IconType iconType_;
     juce::Colour baseColour_;
+    bool activeHighlight_ = false;
 };
 
 TransportComponent::TransportComponent(AudioEngine& audioEngine)
@@ -299,6 +378,14 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
         if (onPreviousSongClicked) onPreviousSongClicked();
     };
     addChildComponent(prevSongButton_.get());
+
+    // Skip back section button (queues previous section for when current section finishes)
+    skipBackButton_ = std::make_unique<TransportIconButton>("Skip Back Section", TransportIconButton::IconType::SkipBack, AppTheme::bgPanel);
+    skipBackButton_->setEnabled(false);
+    skipBackButton_->onClick = [this]() {
+        audioEngine_.skipSection(-1);
+    };
+    addAndMakeVisible(skipBackButton_.get());
 
     // Play/Pause button
     playPauseButton_ = std::make_unique<TransportIconButton>("Play", TransportIconButton::IconType::Play, AppTheme::primaryBlue);
@@ -319,6 +406,22 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
         if (onStopClicked) onStopClicked();
     };
     addAndMakeVisible(stopButton_.get());
+
+    // Repeat current section button (plays to end of current section, restarts once, then resets; click again to cancel)
+    repeatSectionButton_ = std::make_unique<TransportIconButton>("Repeat Current Section", TransportIconButton::IconType::Repeat, AppTheme::bgPanel);
+    repeatSectionButton_->setEnabled(false);
+    repeatSectionButton_->onClick = [this]() {
+        audioEngine_.toggleRepeatCurrentSection();
+    };
+    addAndMakeVisible(repeatSectionButton_.get());
+
+    // Skip forward section button (queues next section for when current section finishes)
+    skipForwardButton_ = std::make_unique<TransportIconButton>("Skip Forward Section", TransportIconButton::IconType::SkipForward, AppTheme::bgPanel);
+    skipForwardButton_->setEnabled(false);
+    skipForwardButton_->onClick = [this]() {
+        audioEngine_.skipSection(1);
+    };
+    addAndMakeVisible(skipForwardButton_.get());
 
     // Next song button
     nextSongButton_ = std::make_unique<TransportIconButton>("Next Song", TransportIconButton::IconType::Next, AppTheme::bgPanel);
@@ -362,17 +465,17 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     keyPrefixLabel_.setJustificationType(juce::Justification::centredRight);
     addChildComponent(keyPrefixLabel_);
 
-    const char* keys[] = { "C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B",
-                           "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
-    int kid = 1;
-    for (const char* k : keys) {
-        keyBox_.addItem(k, kid++);
-    }
+    populateKeyBoxOptions(false, "");
     keyBox_.setSelectedId(1, juce::dontSendNotification);
     keyBox_.onChange = [this]() {
         std::string newKey = keyBox_.getText().toStdString();
         if (!newKey.empty() && newKey != currentKey_) {
             currentKey_ = newKey;
+            const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+            if (usingTracks) {
+                arrangementTargetKey_ = newKey;
+                applyCurrentKeyPitchShift();
+            }
             notifySongParamsChanged();
         }
     };
@@ -599,8 +702,75 @@ void TransportComponent::notifySongParamsChanged() {
 void TransportComponent::updateSongParamEditorsEnabled() {
     const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
     tempoEditor_.setEnabled(!usingTracks);
-    keyBox_.setEnabled(!usingTracks);
+    keyBox_.setEnabled(true); // Key can be transposed live via real-time pitch shifting (Drums & FX excluded)
     timeSigBox_.setEnabled(!usingTracks);
+}
+
+void TransportComponent::applyCurrentKeyPitchShift() {
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    if (!usingTracks) {
+        audioEngine_.setPitchSemitones(0);
+        keyBox_.setTooltip("Song Key (click-only mode)");
+        return;
+    }
+
+    std::string sourceKey;
+    if (!currentArrangements_.empty()) {
+        const SongArrangement* activeArr = nullptr;
+        if (activeArrangementId_.has_value()) {
+            for (const auto& arr : currentArrangements_) {
+                if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
+                    activeArr = &arr;
+                    break;
+                }
+            }
+        }
+        if (!activeArr) activeArr = &currentArrangements_.front();
+        sourceKey = activeArr->key;
+    }
+    if (sourceKey.empty() && !currentTracks_.empty()) {
+        sourceKey = currentTracks_[0].trackKey;
+    }
+
+    int semitones = sourceKey.empty() ? 0 : computeSemitoneShift(sourceKey, currentKey_);
+    audioEngine_.setPitchSemitones(semitones);
+
+    if (semitones != 0 && !sourceKey.empty()) {
+        juce::String sign = (semitones > 0) ? "+" : "";
+        keyBox_.setTooltip("Pitch shifted " + sign + juce::String(semitones) +
+                           " semitones from " + juce::String(sourceKey) + " (Drums & FX excluded)");
+    } else if (!sourceKey.empty()) {
+        keyBox_.setTooltip("Original arrangement key: " + juce::String(sourceKey));
+    } else {
+        keyBox_.setTooltip("Song Key");
+    }
+}
+
+void TransportComponent::populateKeyBoxOptions(bool filterByTrackKey, const std::string& trackSourceKey) {
+    static const char* kMajorKeys[] = { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" };
+    static const char* kMinorKeys[] = { "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
+
+    keyBox_.clear(juce::dontSendNotification);
+    int kid = 1;
+
+    if (filterByTrackKey && !trackSourceKey.empty()) {
+        if (isMinorKey(trackSourceKey)) {
+            for (const char* k : kMinorKeys) {
+                keyBox_.addItem(k, kid++);
+            }
+        } else {
+            for (const char* k : kMajorKeys) {
+                keyBox_.addItem(k, kid++);
+            }
+        }
+    } else {
+        for (const char* k : kMajorKeys) {
+            keyBox_.addItem(k, kid++);
+        }
+        for (const char* k : kMinorKeys) {
+            keyBox_.addItem(k, kid++);
+        }
+    }
 }
 
 void TransportComponent::applyActiveModeSettings() {
@@ -620,8 +790,27 @@ void TransportComponent::applyActiveModeSettings() {
         if (!activeArr) activeArr = &currentArrangements_.front();
     }
 
+    std::string trackSourceKey;
+    if (usingTracks) {
+        if (activeArr && !activeArr->key.empty()) {
+            trackSourceKey = activeArr->key;
+        } else if (!currentTracks_.empty() && !currentTracks_[0].trackKey.empty()) {
+            trackSourceKey = currentTracks_[0].trackKey;
+        }
+    }
+
+    populateKeyBoxOptions(usingTracks, trackSourceKey);
+
     int targetTempo = activeArr ? activeArr->tempo : clickOnlyTempo_;
-    std::string targetKey = activeArr ? (activeArr->key.empty() ? "C" : activeArr->key) : clickOnlyKey_;
+    std::string targetKey = activeArr
+                                ? (!arrangementTargetKey_.empty() ? arrangementTargetKey_
+                                                                  : (activeArr->key.empty() ? "C" : activeArr->key))
+                                : clickOnlyKey_;
+    if (usingTracks && !trackSourceKey.empty() && !targetKey.empty() &&
+        isMinorKey(targetKey) != isMinorKey(trackSourceKey)) {
+        targetKey = trackSourceKey;
+        arrangementTargetKey_ = trackSourceKey;
+    }
     std::string targetSig = activeArr ? (activeArr->timeSignature.empty() ? "4/4" : activeArr->timeSignature) : clickOnlyTimeSig_;
     bool target8 = activeArr ? activeArr->clickEighths : clickOnlyEighths_;
     bool target16 = activeArr ? activeArr->clickSixteenths : clickOnlySixteenths_;
@@ -650,6 +839,7 @@ void TransportComponent::applyActiveModeSettings() {
 
     audioEngine_.setTempo(currentTempo_);
     audioEngine_.setTimeSignature(currentTimeSig_);
+    applyCurrentKeyPitchShift();
 
     eighthsToggle_.setToggleState(target8, juce::dontSendNotification);
     sixteenthsToggle_.setToggleState(target16, juce::dontSendNotification);
@@ -672,6 +862,7 @@ void TransportComponent::syncArrangements(const std::vector<SongArrangement>& ar
                                           float clickOnlySixteenthsGain) {
     currentArrangements_ = arrangements;
     activeArrangementId_ = activeArrangementId;
+    arrangementTargetKey_ = currentKey_; // Preserves any setlist-overridden transposed key passed via setSongInfo()
     clickOnlyTempo_ = (clickOnlyTempo > 0) ? clickOnlyTempo : 120;
     clickOnlyKey_ = clickOnlyKey.empty() ? "C" : clickOnlyKey;
     clickOnlyTimeSig_ = clickOnlyTimeSig.empty() ? "4/4" : clickOnlyTimeSig;
@@ -790,6 +981,9 @@ void TransportComponent::syncTracksAvailability(std::optional<int64_t> songId,
                                                 const std::vector<SongTrack>& tracks,
                                                 bool hasLoadedTracks,
                                                 const std::vector<SongSection>& sections) {
+    currentSections_ = sections;
+    lastSectionLeadingCount_ = audioEngine_.hasLeadingCountSection();
+    currentSectionSpans_ = buildSectionSpans(currentSections_, lastSectionLeadingCount_);
     beatPlayhead_.setSections(sections);
     std::vector<std::string> newPaths;
     newPaths.reserve(tracks.size());
@@ -952,8 +1146,38 @@ void TransportComponent::timerCallback() {
 
     bool hasTracks = audioEngine_.hasLoadedTracks();
     bool showWaveform = hasTracks && useTracksToggle_.getToggleState();
+    double totalBarsElapsed = audioEngine_.getTotalBarsElapsed();
+    bool leadingCount = audioEngine_.hasLeadingCountSection();
+    int queuedSec = audioEngine_.getQueuedSectionIndex();
 
-    beatPlayhead_.updatePlayhead(audioEngine_.getTotalBarsElapsed(),
+    if (leadingCount != lastSectionLeadingCount_) {
+        lastSectionLeadingCount_ = leadingCount;
+        currentSectionSpans_ = buildSectionSpans(currentSections_, leadingCount);
+    }
+
+    bool canSkipBack = false;
+    bool canSkipFwd = false;
+    bool canRepeat = false;
+    bool repeatActive = false;
+    if (playing && showWaveform && !currentSectionSpans_.empty()) {
+        int currentBar = static_cast<int>(std::floor(std::max(0.0, totalBarsElapsed)));
+        SectionContext ctx = computeSectionContext(currentSectionSpans_, currentBar);
+        const int secCount = static_cast<int>(currentSectionSpans_.size());
+        canSkipBack = canSkipSectionInDirection(secCount, ctx, queuedSec, -1);
+        canSkipFwd = canSkipSectionInDirection(secCount, ctx, queuedSec, 1);
+        canRepeat = canRepeatCurrentSection(secCount, ctx);
+        repeatActive = canRepeat && (queuedSec == ctx.currentSectionIndex);
+    }
+    if (skipBackButton_) skipBackButton_->setEnabled(canSkipBack);
+    if (skipForwardButton_) skipForwardButton_->setEnabled(canSkipFwd);
+    if (repeatSectionButton_) {
+        repeatSectionButton_->setEnabled(canRepeat);
+        repeatSectionButton_->setActiveHighlight(repeatActive);
+        repeatSectionButton_->setBaseColour(repeatActive ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
+        repeatSectionButton_->setTooltip(repeatActive ? "Cancel Repeat Current Section" : "Repeat Current Section");
+    }
+
+    beatPlayhead_.updatePlayhead(totalBarsElapsed,
                                 audioEngine_.getCurrentBeatInBar(),
                                 audioEngine_.getCurrentBar(),
                                 audioEngine_.getBeatsPerBar(),
@@ -964,7 +1188,8 @@ void TransportComponent::timerCallback() {
                                 audioEngine_.getTrackDurationInBars(),
                                 audioEngine_.getTrackBarCount(),
                                 audioEngine_.isLoadingTracks(),
-                                audioEngine_.hasLeadingCountSection());
+                                leadingCount,
+                                queuedSec);
 
     outputMeter_.updatePeaks(audioEngine_.getOutputPeaks());
 }
@@ -1074,20 +1299,29 @@ void TransportComponent::resized() {
 
         area.removeFromTop(12);
 
-        // Transport controls row: Previous | Play/Pause | Stop | Next icon buttons
+        // Transport controls row: Previous Song | Skip Back | Play/Pause | Stop | Repeat Section | Skip Forward | Next Song
         auto transportRow = area.removeFromTop(36);
         prevSongButton_->setVisible(true);
+        skipBackButton_->setVisible(true);
+        repeatSectionButton_->setVisible(true);
+        skipForwardButton_->setVisible(true);
         nextSongButton_->setVisible(true);
-        const int btnGap = 10;
-        const int iconBtnW = 52;
-        const int playW = 68;
-        const int totalBtnW = iconBtnW + btnGap + playW + btnGap + iconBtnW + btnGap + iconBtnW;
+        const int btnGap = 8;
+        const int iconBtnW = 46;
+        const int playW = 60;
+        const int totalBtnW = iconBtnW * 6 + playW + btnGap * 6;
         auto btnGroup = transportRow.withSizeKeepingCentre(std::min(transportRow.getWidth(), totalBtnW), 36);
         prevSongButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+        btnGroup.removeFromLeft(btnGap);
+        skipBackButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
         btnGroup.removeFromLeft(btnGap);
         playPauseButton_->setBounds(btnGroup.removeFromLeft(playW));
         btnGroup.removeFromLeft(btnGap);
         stopButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+        btnGroup.removeFromLeft(btnGap);
+        repeatSectionButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+        btnGroup.removeFromLeft(btnGap);
+        skipForwardButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
         btnGroup.removeFromLeft(btnGap);
         nextSongButton_->setBounds(btnGroup);
 
@@ -1187,6 +1421,9 @@ void TransportComponent::resized() {
     faderStripBounds_.clear();
     prevSongButton_->setVisible(false);
     nextSongButton_->setVisible(false);
+    skipBackButton_->setVisible(true);
+    repeatSectionButton_->setVisible(true);
+    skipForwardButton_->setVisible(true);
     arrangementBox_.setVisible(false);
     clickChannelBox_.setVisible(false);
     guideChannelBox_.setVisible(false);
@@ -1195,13 +1432,19 @@ void TransportComponent::resized() {
 
     auto area = getLocalBounds().reduced(12, 8);
 
-    // Left controls: Play/Pause and Stop icon buttons side-by-side
-    auto btnArea = area.removeFromLeft(116).withSizeKeepingCentre(116, 38);
-    playPauseButton_->setBounds(btnArea.removeFromLeft(60));
-    btnArea.removeFromLeft(8);
-    stopButton_->setBounds(btnArea);
+    // Left controls: Skip Back | Play/Pause | Stop | Repeat Section | Skip Forward icon buttons
+    auto btnArea = area.removeFromLeft(182).withSizeKeepingCentre(182, 38);
+    skipBackButton_->setBounds(btnArea.removeFromLeft(29));
+    btnArea.removeFromLeft(4);
+    playPauseButton_->setBounds(btnArea.removeFromLeft(44));
+    btnArea.removeFromLeft(4);
+    stopButton_->setBounds(btnArea.removeFromLeft(34));
+    btnArea.removeFromLeft(4);
+    repeatSectionButton_->setBounds(btnArea.removeFromLeft(30));
+    btnArea.removeFromLeft(4);
+    skipForwardButton_->setBounds(btnArea);
 
-    area.removeFromLeft(12);
+    area.removeFromLeft(8);
 
     // Song info column
     auto infoArea = area.removeFromLeft(392);
@@ -1224,16 +1467,16 @@ void TransportComponent::resized() {
     badgeRow.removeFromLeft(2);
     sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(56));
 
-    area.removeFromLeft(12);
+    area.removeFromLeft(8);
 
     // Center: Beat playhead
-    auto playheadArea = area.removeFromLeft(140);
-    beatPlayhead_.setBounds(playheadArea.withSizeKeepingCentre(134, 60));
+    auto playheadArea = area.removeFromLeft(132);
+    beatPlayhead_.setBounds(playheadArea.withSizeKeepingCentre(128, 60));
 
-    area.removeFromLeft(12);
+    area.removeFromLeft(8);
 
     // Right: Output Peak Meter
-    auto meterArea = area.removeFromRight(136);
+    auto meterArea = area.removeFromRight(126);
     outputMeter_.setBounds(meterArea);
 
     area.removeFromRight(12);

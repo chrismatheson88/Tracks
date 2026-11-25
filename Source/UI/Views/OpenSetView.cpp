@@ -180,7 +180,8 @@ Song OpenSetView::buildEffectiveSongForEntry(const SetlistEntry& entry) const {
     if (arr != nullptr && !arr->tracks.empty()) {
         effectiveSong.activeArrangementId = arr->id;
         effectiveSong.tempo = arr->tempo;
-        effectiveSong.key = arr->key.empty() ? effectiveSong.key : arr->key;
+        std::string baseKey = arr->key.empty() ? effectiveSong.key : arr->key;
+        effectiveSong.key = (entry.overrideKey.has_value() && !entry.overrideKey->empty()) ? *entry.overrideKey : baseKey;
         effectiveSong.timeSignature = arr->timeSignature.empty() ? effectiveSong.timeSignature : arr->timeSignature;
         effectiveSong.clickEighths = arr->clickEighths;
         effectiveSong.clickSixteenths = arr->clickSixteenths;
@@ -442,6 +443,7 @@ void OpenSetView::selectArrangementForCurrentSong(int64_t arrangementId) {
     }
 
     entry.arrangementId = arrangementId;
+    entry.overrideKey = std::nullopt; // Start cleanly in the newly selected arrangement's recorded key
     saveCurrentSetlist();
     entryListBox_.repaintRow(selectedEntryIndex_);
 
@@ -501,9 +503,15 @@ void OpenSetView::applySongParameters(int tempo, const std::string& key, const s
     const std::string cleanSig = timeSignature.empty() ? "4/4" : timeSignature;
 
     if (entry.song.has_value()) {
-        entry.overrideTempo = (clampedTempo == entry.song->tempo) ? std::nullopt : std::optional<int>(clampedTempo);
-        entry.overrideKey = (cleanKey == entry.song->key) ? std::nullopt : std::optional<std::string>(cleanKey);
-        entry.overrideTimeSignature = (cleanSig == entry.song->timeSignature) ? std::nullopt : std::optional<std::string>(cleanSig);
+        const auto* arr = entry.getSelectedArrangement();
+        const bool hasArrTracks = (arr != nullptr && !arr->tracks.empty());
+        const int baseTempo = hasArrTracks ? arr->tempo : entry.song->tempo;
+        const std::string baseKey = (hasArrTracks && !arr->key.empty()) ? arr->key : entry.song->key;
+        const std::string baseSig = (hasArrTracks && !arr->timeSignature.empty()) ? arr->timeSignature : entry.song->timeSignature;
+
+        entry.overrideTempo = (clampedTempo == baseTempo) ? std::nullopt : std::optional<int>(clampedTempo);
+        entry.overrideKey = (cleanKey == baseKey) ? std::nullopt : std::optional<std::string>(cleanKey);
+        entry.overrideTimeSignature = (cleanSig == baseSig) ? std::nullopt : std::optional<std::string>(cleanSig);
     } else {
         entry.overrideTempo = clampedTempo;
         entry.overrideKey = cleanKey;

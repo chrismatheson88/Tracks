@@ -25,7 +25,8 @@ public:
                         double trackDurationBars = 0.0,
                         int trackBarCount = 0,
                         bool isLoadingTracks = false,
-                        bool hasLeadingCountSection = false);
+                        bool hasLeadingCountSection = false,
+                        int queuedSectionIndex = -1);
 
     void paint(juce::Graphics& g) override;
 
@@ -41,6 +42,7 @@ private:
     bool showTracksWaveform_ = false;
     bool isLoadingTracks_ = false;
     bool hasLeadingCountSection_ = false;
+    int queuedSectionIndex_ = -1;
     double trackDurationBars_ = 0.0;
     int trackBarCount_ = 0;
     std::vector<float> waveformPeaks_;

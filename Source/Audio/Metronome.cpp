@@ -18,8 +18,31 @@ void Metronome::reset() {
     metronomeFrame_ = 0;
     currentBeatInBar_ = 0;
     currentBar_ = 0;
+    overrideAnnouncementBar_ = -1;
+    overrideAnnouncementKey_.clear();
     totalBarsElapsed_.store(0.0, std::memory_order_relaxed);
     activeSamples_.clear();
+}
+
+void Metronome::jumpToFrame(int64_t newFrame) {
+    const int64_t clampedFrame = std::max<int64_t>(0, newFrame);
+    const int64_t delta = clampedFrame - metronomeFrame_;
+
+    // Shift ringing click / guide tails by delta so they finish smoothly across the jump
+    // without cutting off abruptly or replaying later on the timeline.
+    for (auto& sample : activeSamples_) {
+        sample.startFrame += delta;
+    }
+
+    metronomeFrame_ = clampedFrame;
+    const int64_t safeBeatFrames = std::max<int64_t>(1, beatFrames_);
+    const int64_t beatIndex = metronomeFrame_ / safeBeatFrames;
+    currentBar_ = static_cast<int>(beatIndex / pulseCountPerBar_);
+    currentBeatInBar_ = static_cast<int>(beatIndex % pulseCountPerBar_);
+
+    const int64_t framesPerBar = std::max<int64_t>(1, beatFrames_ * pulseCountPerBar_);
+    totalBarsElapsed_.store(static_cast<double>(metronomeFrame_) / static_cast<double>(framesPerBar),
+                            std::memory_order_relaxed);
 }
 
 void Metronome::setTempo(int tempo) {
@@ -35,6 +58,8 @@ void Metronome::setTimeSignature(const std::string& timeSignature) {
 void Metronome::setSections(const std::vector<SongSection>& sections) {
     sectionCountWindows_.clear();
     sectionAnnouncements_.clear();
+    overrideAnnouncementBar_ = -1;
+    overrideAnnouncementKey_.clear();
     leadingCountBars_ = 0;
 
     // Count consecutive leading "count" sections from the start of the audio files
@@ -108,8 +133,32 @@ const juce::AudioBuffer<float>* Metronome::findSectionCueBuffer(const std::strin
     return nullptr;
 }
 
+void Metronome::setQueuedAnnouncementOverride(int cueBar, const std::string& normalizedKey) {
+    overrideAnnouncementBar_ = cueBar;
+    overrideAnnouncementKey_ = normalizedKey;
+}
+
+void Metronome::clearQueuedAnnouncementOverride() {
+    overrideAnnouncementBar_ = -1;
+    overrideAnnouncementKey_.clear();
+}
+
 std::string Metronome::getScheduledGuideCueForBeat(int bar, int beatInBar) const {
     static const char* countWords[8] = { "one", "two", "three", "four", "five", "six", "seven", "eight" };
+
+    if (useSectionCountIn_ && overrideAnnouncementBar_ >= 0 && bar == overrideAnnouncementBar_) {
+        if (overrideAnnouncementKey_.empty()) {
+            // Target section is a "count" section: don't announce the skipped section
+            return getCountInVoiceWordForBeat(bar, beatInBar);
+        }
+        if (beatInBar == 0) {
+            return "section:" + overrideAnnouncementKey_;
+        }
+        if (beatInBar >= 1 && beatInBar < 8) {
+            return countWords[beatInBar];
+        }
+        return "";
+    }
 
     if (useSectionCountIn_ && !sectionAnnouncements_.empty()) {
         for (const auto& ann : sectionAnnouncements_) {

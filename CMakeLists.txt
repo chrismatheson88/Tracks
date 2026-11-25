@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Tracks VERSION 1.0.0 LANGUAGES C CXX)
+project(Tracks VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ juce_add_binary_data(AudioBinaryData
         assets/guide/female/count-6.wav
         assets/guide/female/count-7.wav
         assets/guide/female/count-8.wav
+        assets/icon/TracksIcon.png
         assets/icon/TracksLogo.png
 )
 
@@ -50,6 +51,9 @@ target_sources(Tracks PRIVATE
     Source/MainComponent.cpp
     Source/Common/AppTheme.h
     Source/Common/AppTheme.cpp
+    Source/Common/MacDockIcon.h
+    Source/Common/MacDockIcon.mm
+    Source/Models/AvailableSections.h
     Source/Models/Song.h
     Source/Models/SongTrack.h
     Source/Models/Setlist.h
@@ -60,6 +64,8 @@ target_sources(Tracks PRIVATE
     Source/Audio/AudioEngine.cpp
     Source/Audio/Metronome.h
     Source/Audio/Metronome.cpp
+    Source/Audio/PitchShiftUtils.h
+    Source/Audio/SectionJumpUtils.h
     Source/Services/AudioAttachmentService.h
     Source/Services/AudioAttachmentService.cpp
     Source/UI/Widgets/BeatPlayheadComponent.h
@@ -78,6 +84,11 @@ target_sources(Tracks PRIVATE
     Source/UI/Views/OpenSetView.cpp
     Source/UI/Views/SettingsView.h
     Source/UI/Views/SettingsView.cpp
+)
+
+target_include_directories(Tracks PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/signalsmith-stretch"
 )
 
 target_link_libraries(Tracks
@@ -111,6 +122,11 @@ add_executable(AudioEngineTests
     Source/Audio/Metronome.cpp
     Source/Services/AudioAttachmentService.cpp
 )
+target_include_directories(AudioEngineTests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/signalsmith-stretch"
+)
+
 target_link_libraries(AudioEngineTests
     PRIVATE
         juce::juce_core

@@ -1,6 +1,8 @@
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <BinaryData.h>
 #include "MainComponent.h"
 #include "Common/AppTheme.h"
+#include "Common/MacDockIcon.h"
 
 namespace tracks {
 
@@ -13,6 +15,7 @@ public:
     bool moreThanOneInstanceAllowed() override             { return true; }
 
     void initialise(const juce::String& /*commandLine*/) override {
+        setMacDockIconFromPngData(BinaryData::TracksIcon_png, BinaryData::TracksIcon_pngSize);
         mainWindow_ = std::make_unique<MainWindow>(getApplicationName());
     }
 

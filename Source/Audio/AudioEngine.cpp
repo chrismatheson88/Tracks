@@ -27,6 +27,10 @@ AudioEngine::AudioEngine() {
 
     outputPeaks_.resize(static_cast<size_t>(chCount), 0.0f);
     metronome_.prepare(currentSampleRate_);
+    pitchInScratch_.setSize(2, 4096);
+    pitchOutScratch_.setSize(2, 4096);
+    pitchPrimeInScratch_.setSize(2, 16384);
+    pitchPrimeOutScratch_.setSize(2, 16384);
 
     loadEmbeddedAssets();
     loaderThread_ = std::thread([this]() { loaderLoop(); });
@@ -605,6 +609,7 @@ void AudioEngine::applyCachedAudio(const std::shared_ptr<CachedSongAudio>& cache
                 loadedTracks_.push_back(std::move(lt));
             }
             maxSongLengthFrames_ = cached->maxLengthFrames;
+            preparePitchShiftersLocked();
         }
 
         if (overrideSettings) {
@@ -617,6 +622,7 @@ void AudioEngine::applyCachedAudio(const std::shared_ptr<CachedSongAudio>& cache
             metronome_.setUseSectionCountIn(useTracks_.load(std::memory_order_relaxed) && !loadedTracks_.empty());
             metronome_.reset();
             hasLeadingCountSection_.store(metronome_.hasLeadingCountSection(), std::memory_order_relaxed);
+            rebuildSectionSpansLocked(overrideSettings->sections);
             int totalSecBars = 0;
             for (const auto& sec : overrideSettings->sections) {
                 totalSecBars += std::max(1, sec.lengthBars);
@@ -783,6 +789,7 @@ void AudioEngine::loadSong(const Song& song) {
             metronome_.setSixteenthClickGain(song.clickSixteenthsGain);
             metronome_.setUseSectionCountIn(useTracks_.load(std::memory_order_relaxed) && hasTracks_.load(std::memory_order_relaxed));
             hasLeadingCountSection_.store(metronome_.hasLeadingCountSection(), std::memory_order_relaxed);
+            rebuildSectionSpansLocked(song.sections);
             int totalSecBars = 0;
             for (const auto& sec : song.sections) {
                 totalSecBars += std::max(1, sec.lengthBars);
@@ -843,6 +850,7 @@ void AudioEngine::loadSong(const Song& song) {
         metronome_.reset();
         hasTracks_.store(true, std::memory_order_relaxed);
         hasLeadingCountSection_.store(metronome_.hasLeadingCountSection(), std::memory_order_relaxed);
+        rebuildSectionSpansLocked(song.sections);
         int totalSecBars = 0;
         for (const auto& sec : song.sections) {
             totalSecBars += std::max(1, sec.lengthBars);
@@ -872,6 +880,100 @@ void AudioEngine::setUseTracks(bool enabled) {
     useTracks_.store(enabled, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(audioMutex_);
     metronome_.setUseSectionCountIn(enabled && hasTracks_.load(std::memory_order_relaxed));
+    if (!enabled) {
+        clearQueuedSectionLocked();
+    }
+}
+
+void AudioEngine::rebuildSectionSpansLocked(const std::vector<SongSection>& sections) {
+    sectionSpans_ = buildSectionSpans(sections, metronome_.hasLeadingCountSection());
+    sectionCountAtomic_.store(static_cast<int>(sectionSpans_.size()), std::memory_order_relaxed);
+    clearQueuedSectionLocked();
+}
+
+void AudioEngine::clearQueuedSectionLocked() {
+    queuedSectionIndex_ = -1;
+    queuedJumpBoundaryBar_ = -1;
+    queuedSectionIndexAtomic_.store(-1, std::memory_order_relaxed);
+    metronome_.clearQueuedAnnouncementOverride();
+}
+
+void AudioEngine::clearQueuedSection() {
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    clearQueuedSectionLocked();
+}
+
+void AudioEngine::skipSection(int delta) {
+    if (delta == 0) return;
+
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    const int n = static_cast<int>(sectionSpans_.size());
+    if (n == 0 || !isPlaying_.load() ||
+        !useTracks_.load(std::memory_order_relaxed) ||
+        !hasTracks_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    const int64_t framesPerBar = metronome_.getFramesPerBar();
+    if (framesPerBar <= 0) return;
+
+    const int currentBar = static_cast<int>(metronome_.getMetronomeFrame() / framesPerBar);
+    const SectionContext ctx = computeSectionContext(sectionSpans_, currentBar);
+    const int nextQueued = computeNextQueuedSection(n, ctx, queuedSectionIndex_, delta);
+
+    if (nextQueued < 0) {
+        clearQueuedSectionLocked();
+        return;
+    }
+
+    queuedSectionIndex_ = nextQueued;
+    queuedJumpBoundaryBar_ = ctx.boundaryBar;
+    queuedSectionIndexAtomic_.store(nextQueued, std::memory_order_relaxed);
+
+    const auto& targetSpan = sectionSpans_[static_cast<size_t>(nextQueued)];
+    const int cueBar = ctx.boundaryBar - 1;
+    if (cueBar >= 0) {
+        metronome_.setQueuedAnnouncementOverride(cueBar, targetSpan.isCount ? "" : targetSpan.normalizedKey);
+    } else {
+        metronome_.clearQueuedAnnouncementOverride();
+    }
+}
+
+void AudioEngine::toggleRepeatCurrentSection() {
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    const int n = static_cast<int>(sectionSpans_.size());
+    if (n == 0 || !isPlaying_.load() ||
+        !useTracks_.load(std::memory_order_relaxed) ||
+        !hasTracks_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    const int64_t framesPerBar = metronome_.getFramesPerBar();
+    if (framesPerBar <= 0) return;
+
+    const int currentBar = static_cast<int>(metronome_.getMetronomeFrame() / framesPerBar);
+    const SectionContext ctx = computeSectionContext(sectionSpans_, currentBar);
+    if (!canRepeatCurrentSection(n, ctx)) {
+        return;
+    }
+
+    const int nextQueued = computeToggleRepeatCurrentSection(n, ctx, queuedSectionIndex_);
+    if (nextQueued < 0) {
+        clearQueuedSectionLocked();
+        return;
+    }
+
+    queuedSectionIndex_ = nextQueued;
+    queuedJumpBoundaryBar_ = ctx.boundaryBar;
+    queuedSectionIndexAtomic_.store(nextQueued, std::memory_order_relaxed);
+
+    const auto& targetSpan = sectionSpans_[static_cast<size_t>(nextQueued)];
+    const int cueBar = ctx.boundaryBar - 1;
+    if (cueBar >= 0) {
+        metronome_.setQueuedAnnouncementOverride(cueBar, targetSpan.isCount ? "" : targetSpan.normalizedKey);
+    } else {
+        metronome_.clearQueuedAnnouncementOverride();
+    }
 }
 
 std::vector<float> AudioEngine::getWaveformPeaks() {
@@ -894,12 +996,52 @@ int AudioEngine::getTrackBarCount() const {
     return std::max(audioBars, secBars);
 }
 
+void AudioEngine::preparePitchShiftersLocked() {
+    const int semitones = pitchSemitones_.load(std::memory_order_relaxed);
+    const float sr = static_cast<float>(currentSampleRate_ > 0.0 ? currentSampleRate_ : 44100.0);
+    for (auto& lt : loadedTracks_) {
+        lt.pitchShiftExcluded = shouldExcludeFromPitchShift(lt.track.name);
+        lt.pitchShifterPrimed = false;
+        lt.pitchShifterInputPos = 0;
+        if (lt.pitchShiftExcluded || !lt.buffer || lt.buffer->getNumChannels() <= 0) {
+            lt.pitchShifter.reset();
+            continue;
+        }
+        const int ch = std::clamp(lt.buffer->getNumChannels(), 1, 2);
+        if (!lt.pitchShifter) {
+            lt.pitchShifter = std::make_shared<signalsmith::stretch::SignalsmithStretch<float>>();
+        }
+        lt.pitchShifter->presetDefault(ch, sr);
+        lt.pitchShifter->setTransposeSemitones(static_cast<float>(semitones));
+    }
+}
+
+void AudioEngine::setPitchSemitones(int semitones) {
+    int clamped = std::clamp(semitones, -12, 12);
+    int prev = pitchSemitones_.exchange(clamped, std::memory_order_relaxed);
+    if (prev == clamped) return;
+
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    for (auto& lt : loadedTracks_) {
+        if (lt.pitchShifter && !lt.pitchShiftExcluded) {
+            lt.pitchShifter->setTransposeSemitones(static_cast<float>(clamped));
+            if (clamped == 0) {
+                lt.pitchShifterPrimed = false;
+            }
+        }
+    }
+}
+
 void AudioEngine::play() {
     {
         std::lock_guard<std::mutex> lock(audioMutex_);
         metronome_.reset();
+        clearQueuedSectionLocked();
+        trackJumpFadeSamplesRemaining_ = 0;
         for (auto& t : loadedTracks_) {
             t.position = 0;
+            t.pitchShifterPrimed = false;
+            t.pitchShifterInputPos = 0;
         }
     }
     isPaused_.store(false);
@@ -920,8 +1062,12 @@ void AudioEngine::stop() {
     {
         std::lock_guard<std::mutex> lock(audioMutex_);
         metronome_.reset();
+        clearQueuedSectionLocked();
+        trackJumpFadeSamplesRemaining_ = 0;
         for (auto& t : loadedTracks_) {
             t.position = 0;
+            t.pitchShifterPrimed = false;
+            t.pitchShifterInputPos = 0;
         }
     }
     std::lock_guard<std::mutex> lock(peakMutex_);
@@ -1073,6 +1219,10 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     }
     metronome_.prepare(currentSampleRate_);
     renderScratchBuffer_.setSize(chCount, 2048);
+    {
+        std::lock_guard<std::mutex> aLock(audioMutex_);
+        preparePitchShiftersLocked();
+    }
 
     std::lock_guard<std::mutex> lock(peakMutex_);
     outputPeaks_.assign(static_cast<size_t>(chCount), 0.0f);
@@ -1081,6 +1231,181 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
 void AudioEngine::audioDeviceStopped() {
     std::lock_guard<std::mutex> lock(peakMutex_);
     std::fill(outputPeaks_.begin(), outputPeaks_.end(), 0.0f);
+}
+
+void AudioEngine::renderSegmentLocked(int scratchOffset,
+                                      int segmentSamples,
+                                      int numOutputChannels,
+                                      bool playTracks,
+                                      int64_t audioStartFrame) {
+    const int64_t blockStartFrame = metronome_.getMetronomeFrame();
+    const int64_t blockEndFrame = blockStartFrame + segmentSamples;
+
+    if (playTracks && blockEndFrame > audioStartFrame) {
+        const int relOutOffset = static_cast<int>(std::max<int64_t>(0, audioStartFrame - blockStartFrame));
+        const int outOffset = scratchOffset + relOutOffset;
+        const int samplesForTrack = segmentSamples - relOutOffset;
+        const int64_t trackStartPos = std::max<int64_t>(0, blockStartFrame - audioStartFrame);
+        const int semitones = pitchSemitones_.load(std::memory_order_relaxed);
+
+        if (semitones != 0 &&
+            (pitchInScratch_.getNumSamples() < samplesForTrack || pitchOutScratch_.getNumSamples() < samplesForTrack)) {
+            pitchInScratch_.setSize(2, samplesForTrack, false, false, true);
+            pitchOutScratch_.setSize(2, samplesForTrack, false, false, true);
+        }
+
+        for (auto& lt : loadedTracks_) {
+            if (lt.track.muted || !lt.buffer || lt.buffer->getNumSamples() == 0)
+                continue;
+
+            const int64_t trackSamples = static_cast<int64_t>(lt.buffer->getNumSamples());
+            if (trackStartPos >= trackSamples)
+                continue;
+
+            const int available = static_cast<int>(std::min<int64_t>(samplesForTrack, trackSamples - trackStartPos));
+            if (available <= 0)
+                continue;
+
+            const int channelA = std::clamp(lt.track.outputChannel, 0, std::max(0, numOutputChannels - 1));
+            const int trackChannels = lt.buffer->getNumChannels();
+            const float gain = lt.track.gain;
+
+            // Select source pointers: direct buffer when semitones == 0 or excluded (Drums/FX),
+            // or real-time latency-compensated Signalsmith Stretch output when pitch shifting.
+            const float* srcL = lt.buffer->getReadPointer(0) + static_cast<int>(trackStartPos);
+            const float* srcR = (trackChannels >= 2)
+                                    ? (lt.buffer->getReadPointer(1) + static_cast<int>(trackStartPos))
+                                    : nullptr;
+
+            const bool applyPitchShift = (semitones != 0) && !lt.pitchShiftExcluded && (lt.pitchShifter != nullptr);
+            if (applyPitchShift) {
+                auto& shifter = *lt.pitchShifter;
+                const int procCh = std::clamp(trackChannels, 1, 2);
+                const int totalLat = shifter.inputLatency() + shifter.outputLatency();
+                const int64_t desiredInputStart = trackStartPos + totalLat;
+
+                auto fillFromBuffer = [&](juce::AudioBuffer<float>& dst, int64_t srcStart, int count) {
+                    for (int c = 0; c < procCh; ++c) {
+                        float* d = dst.getWritePointer(c);
+                        const float* s = lt.buffer->getReadPointer(c);
+                        for (int i = 0; i < count; ++i) {
+                            int64_t idx = srcStart + i;
+                            d[i] = (idx >= 0 && idx < trackSamples) ? s[idx] : 0.0f;
+                        }
+                    }
+                };
+
+                if (!lt.pitchShifterPrimed || lt.pitchShifterInputPos != desiredInputStart) {
+                    shifter.reset();
+                    shifter.setTransposeSemitones(static_cast<float>(semitones));
+                    if (totalLat > 0) {
+                        if (pitchPrimeInScratch_.getNumSamples() < totalLat) {
+                            pitchPrimeInScratch_.setSize(2, totalLat, false, false, true);
+                            pitchPrimeOutScratch_.setSize(2, totalLat, false, false, true);
+                        }
+                        fillFromBuffer(pitchPrimeInScratch_, trackStartPos, totalLat);
+                        float* pInPtrs[2] = { pitchPrimeInScratch_.getWritePointer(0), pitchPrimeInScratch_.getWritePointer(1) };
+                        float* pOutPtrs[2] = { pitchPrimeOutScratch_.getWritePointer(0), pitchPrimeOutScratch_.getWritePointer(1) };
+                        shifter.process(pInPtrs, totalLat, pOutPtrs, totalLat);
+                    }
+                    lt.pitchShifterPrimed = true;
+                    lt.pitchShifterInputPos = desiredInputStart;
+                }
+
+                fillFromBuffer(pitchInScratch_, desiredInputStart, available);
+                float* inPtrs[2] = { pitchInScratch_.getWritePointer(0), pitchInScratch_.getWritePointer(1) };
+                float* outPtrs[2] = { pitchOutScratch_.getWritePointer(0), pitchOutScratch_.getWritePointer(1) };
+                shifter.process(inPtrs, available, outPtrs, available);
+                lt.pitchShifterInputPos = desiredInputStart + available;
+
+                srcL = pitchOutScratch_.getReadPointer(0);
+                srcR = (procCh >= 2) ? pitchOutScratch_.getReadPointer(1) : nullptr;
+            }
+
+            if (trackChannels >= 2 && srcR != nullptr) {
+                const bool routeAsStereo = lt.track.stereoOutput && (channelA + 1 < numOutputChannels);
+                if (routeAsStereo) {
+                    // Explicit stereo pair output: [channelA (L), channelA + 1 (R)]
+                    float* dstL = renderScratchBuffer_.getWritePointer(channelA) + outOffset;
+                    float* dstR = renderScratchBuffer_.getWritePointer(channelA + 1) + outOffset;
+                    for (int i = 0; i < available; ++i) {
+                        dstL[i] += srcL[i] * gain;
+                        dstR[i] += srcR[i] * gain;
+                    }
+                } else if (channelA < numOutputChannels) {
+                    // Single-channel mono sum with adaptive equal-power RMS compensation
+                    // and anti-phase cancellation protection (eliminates -3 dB wide-stereo drop
+                    // and comb-filtering hollowing on stereo FX/guitars/pads).
+                    float* dst = renderScratchBuffer_.getWritePointer(channelA) + outOffset;
+
+                    double sumEnergy = 0.0;
+                    double diffEnergy = 0.0;
+                    for (int i = 0; i < available; ++i) {
+                        const float l = srcL[i];
+                        const float r = srcR[i];
+                        const float s = l + r;
+                        const float d = l - r;
+                        sumEnergy += static_cast<double>(s) * static_cast<double>(s);
+                        diffEnergy += static_cast<double>(d) * static_cast<double>(d);
+                    }
+
+                    const double totalEnergy = sumEnergy + diffEnergy;
+                    if (totalEnergy > 1e-10) {
+                        const float blockCorr = static_cast<float>((sumEnergy - diffEnergy) / totalEnergy);
+                        lt.smoothedCorrelation = lt.smoothedCorrelation * 0.85f + blockCorr * 0.15f;
+                    }
+
+                    const float posCorr = std::clamp(lt.smoothedCorrelation, 0.0f, 1.0f);
+                    const float rmsSumGain = 1.0f / std::sqrt(2.0f * (1.0f + posCorr));
+                    const float antiPhaseBlend = std::clamp(-lt.smoothedCorrelation, 0.0f, 1.0f);
+
+                    const float targetGainL = (1.0f - antiPhaseBlend) * rmsSumGain + antiPhaseBlend;
+                    const float targetGainR = (1.0f - antiPhaseBlend) * rmsSumGain;
+
+                    const float startGainL = lt.monoGainL;
+                    const float startGainR = lt.monoGainR;
+                    const float invN = (available > 1) ? (1.0f / static_cast<float>(available - 1)) : 0.0f;
+
+                    for (int i = 0; i < available; ++i) {
+                        const float t = static_cast<float>(i) * invN;
+                        const float gL = (startGainL + (targetGainL - startGainL) * t) * gain;
+                        const float gR = (startGainR + (targetGainR - startGainR) * t) * gain;
+                        dst[i] += srcL[i] * gL + srcR[i] * gR;
+                    }
+
+                    lt.monoGainL = targetGainL;
+                    lt.monoGainR = targetGainR;
+                }
+            } else {
+                // Mono track: route directly to channelA
+                if (channelA < numOutputChannels) {
+                    float* dst = renderScratchBuffer_.getWritePointer(channelA) + outOffset;
+                    for (int i = 0; i < available; ++i) {
+                        dst[i] += srcL[i] * gain;
+                    }
+                }
+            }
+
+            lt.position = trackStartPos + available;
+        }
+
+        // Apply a brief de-click fade-in to backing tracks right after a section jump
+        if (trackJumpFadeSamplesRemaining_ > 0 && samplesForTrack > 0) {
+            const int fadeCount = std::min(samplesForTrack, trackJumpFadeSamplesRemaining_);
+            const int alreadyFaded = kTrackJumpFadeSamples - trackJumpFadeSamplesRemaining_;
+            for (int ch = 0; ch < numOutputChannels; ++ch) {
+                float* dst = renderScratchBuffer_.getWritePointer(ch) + outOffset;
+                for (int i = 0; i < fadeCount; ++i) {
+                    const float t = static_cast<float>(alreadyFaded + i) / static_cast<float>(kTrackJumpFadeSamples);
+                    dst[i] *= t;
+                }
+            }
+            trackJumpFadeSamplesRemaining_ -= fadeCount;
+        }
+    }
+
+    // Render metronome and count-in on top (never faded by track jump fade-in)
+    metronome_.renderBlock(renderScratchBuffer_, scratchOffset, segmentSamples);
 }
 
 void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
@@ -1111,119 +1436,70 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
     }
     renderScratchBuffer_.clear();
 
-    // 2. Mix backing tracks (only when "Use tracks" is enabled).
-    // If the song's first section is called "count", the audio files start at frame 0
-    // so that section plays during the count; otherwise audio starts after the 2-bar count-in.
+    // 2. Render backing tracks & metronome (splitting cleanly at any queued section jump boundary)
     const bool playTracks = useTracks_.load(std::memory_order_relaxed) && hasTracks_.load(std::memory_order_relaxed);
-    const int64_t blockStartFrame = metronome_.getMetronomeFrame();
-    const int64_t blockEndFrame = blockStartFrame + numSamples;
-    const int64_t audioStartFrame = (playTracks && hasLeadingCountSection_.load(std::memory_order_relaxed))
-                                        ? 0
-                                        : metronome_.getTotalCountInFrames();
-
-    if (playTracks && blockEndFrame > audioStartFrame) {
+    {
         std::unique_lock<std::mutex> lock(audioMutex_, std::try_to_lock);
         if (lock.owns_lock()) {
-            const int outOffset = static_cast<int>(std::max<int64_t>(0, audioStartFrame - blockStartFrame));
-            const int samplesForTrack = numSamples - outOffset;
-            const int64_t trackStartPos = std::max<int64_t>(0, blockStartFrame - audioStartFrame);
+            const int64_t audioStartFrame = (playTracks && hasLeadingCountSection_.load(std::memory_order_relaxed))
+                                                ? 0
+                                                : metronome_.getTotalCountInFrames();
 
-            for (auto& lt : loadedTracks_) {
-                if (lt.track.muted || !lt.buffer || lt.buffer->getNumSamples() == 0)
-                    continue;
+            int rendered = 0;
+            while (rendered < numSamples) {
+                const int remaining = numSamples - rendered;
+                const int64_t curFrame = metronome_.getMetronomeFrame();
+                const int64_t framesPerBar = metronome_.getFramesPerBar();
 
-                const int64_t trackSamples = static_cast<int64_t>(lt.buffer->getNumSamples());
-                if (trackStartPos >= trackSamples)
-                    continue;
+                int segmentSamples = remaining;
+                bool jumpAfterSegment = false;
+                int64_t jumpTargetFrame = 0;
 
-                const int available = static_cast<int>(std::min<int64_t>(samplesForTrack, trackSamples - trackStartPos));
-                if (available <= 0)
-                    continue;
-
-                const int channelA = std::clamp(lt.track.outputChannel, 0, std::max(0, numOutputChannels - 1));
-                const int trackChannels = lt.buffer->getNumChannels();
-                const float gain = lt.track.gain;
-
-                if (trackChannels >= 2) {
-                    const bool routeAsStereo = lt.track.stereoOutput && (channelA + 1 < numOutputChannels);
-                    if (routeAsStereo) {
-                        // Explicit stereo pair output: [channelA (L), channelA + 1 (R)]
-                        renderScratchBuffer_.addFrom(channelA, outOffset, *lt.buffer, 0, static_cast<int>(trackStartPos), available, gain);
-                        renderScratchBuffer_.addFrom(channelA + 1, outOffset, *lt.buffer, 1, static_cast<int>(trackStartPos), available, gain);
-                    } else if (channelA < numOutputChannels) {
-                        // Single-channel mono sum with adaptive equal-power RMS compensation
-                        // and anti-phase cancellation protection (eliminates -3 dB wide-stereo drop
-                        // and comb-filtering hollowing on stereo FX/guitars/pads).
-                        const float* srcL = lt.buffer->getReadPointer(0) + static_cast<int>(trackStartPos);
-                        const float* srcR = lt.buffer->getReadPointer(1) + static_cast<int>(trackStartPos);
-                        float* dst = renderScratchBuffer_.getWritePointer(channelA) + outOffset;
-
-                        double sumEnergy = 0.0;
-                        double diffEnergy = 0.0;
-                        for (int i = 0; i < available; ++i) {
-                            const float l = srcL[i];
-                            const float r = srcR[i];
-                            const float s = l + r;
-                            const float d = l - r;
-                            sumEnergy += static_cast<double>(s) * static_cast<double>(s);
-                            diffEnergy += static_cast<double>(d) * static_cast<double>(d);
-                        }
-
-                        const double totalEnergy = sumEnergy + diffEnergy;
-                        if (totalEnergy > 1e-10) {
-                            const float blockCorr = static_cast<float>((sumEnergy - diffEnergy) / totalEnergy);
-                            lt.smoothedCorrelation = lt.smoothedCorrelation * 0.85f + blockCorr * 0.15f;
-                        }
-
-                        const float posCorr = std::clamp(lt.smoothedCorrelation, 0.0f, 1.0f);
-                        const float rmsSumGain = 1.0f / std::sqrt(2.0f * (1.0f + posCorr));
-                        const float antiPhaseBlend = std::clamp(-lt.smoothedCorrelation, 0.0f, 1.0f);
-
-                        const float targetGainL = (1.0f - antiPhaseBlend) * rmsSumGain + antiPhaseBlend;
-                        const float targetGainR = (1.0f - antiPhaseBlend) * rmsSumGain;
-
-                        const float startGainL = lt.monoGainL;
-                        const float startGainR = lt.monoGainR;
-                        const float invN = (available > 1) ? (1.0f / static_cast<float>(available - 1)) : 0.0f;
-
-                        for (int i = 0; i < available; ++i) {
-                            const float t = static_cast<float>(i) * invN;
-                            const float gL = (startGainL + (targetGainL - startGainL) * t) * gain;
-                            const float gR = (startGainR + (targetGainR - startGainR) * t) * gain;
-                            dst[i] += srcL[i] * gL + srcR[i] * gR;
-                        }
-
-                        lt.monoGainL = targetGainL;
-                        lt.monoGainR = targetGainR;
-                    }
-                } else {
-                    // Mono track: route directly to channelA
-                    if (channelA < numOutputChannels) {
-                        renderScratchBuffer_.addFrom(channelA, outOffset, *lt.buffer, 0, static_cast<int>(trackStartPos), available, gain);
+                if (playTracks && framesPerBar > 0 && queuedSectionIndex_ >= 0 && queuedJumpBoundaryBar_ >= 0) {
+                    const int64_t boundaryFrame = static_cast<int64_t>(queuedJumpBoundaryBar_) * framesPerBar;
+                    const int targetIdx = queuedSectionIndex_;
+                    if (targetIdx < 0 || targetIdx >= static_cast<int>(sectionSpans_.size())) {
+                        clearQueuedSectionLocked();
+                    } else if (curFrame >= boundaryFrame) {
+                        jumpTargetFrame = static_cast<int64_t>(sectionSpans_[static_cast<size_t>(targetIdx)].startBar) * framesPerBar;
+                        metronome_.jumpToFrame(jumpTargetFrame);
+                        clearQueuedSectionLocked();
+                        trackJumpFadeSamplesRemaining_ = kTrackJumpFadeSamples;
+                        continue;
+                    } else if (curFrame + remaining >= boundaryFrame) {
+                        segmentSamples = static_cast<int>(boundaryFrame - curFrame);
+                        jumpAfterSegment = true;
+                        jumpTargetFrame = static_cast<int64_t>(sectionSpans_[static_cast<size_t>(targetIdx)].startBar) * framesPerBar;
                     }
                 }
 
-                lt.position = trackStartPos + available;
+                renderSegmentLocked(rendered, segmentSamples, numOutputChannels, playTracks, audioStartFrame);
+                rendered += segmentSamples;
+
+                if (jumpAfterSegment) {
+                    metronome_.jumpToFrame(jumpTargetFrame);
+                    clearQueuedSectionLocked();
+                    trackJumpFadeSamplesRemaining_ = kTrackJumpFadeSamples;
+                }
             }
-        }
-    }
 
-    // 3. Render metronome and count-in
-    metronome_.renderBlock(renderScratchBuffer_, 0, numSamples);
-
-    // If playing with tracks enabled, stop cleanly once all bars needed for the audio files/sections finish
-    if (playTracks) {
-        const int64_t framesPerBar = metronome_.getFramesPerBar();
-        const int64_t maxFrames = maxSongLengthFramesAtomic_.load(std::memory_order_relaxed);
-        if (framesPerBar > 0 && maxFrames > 0) {
-            const int64_t audioBars = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(static_cast<double>(maxFrames) / static_cast<double>(framesPerBar))));
-            const int64_t secBars = static_cast<int64_t>(sectionTotalBars_.load(std::memory_order_relaxed));
-            const int64_t trackBars = std::max(audioBars, secBars);
-            const int64_t totalPlaybackFrames = audioStartFrame + trackBars * framesPerBar;
-            if (metronome_.getMetronomeFrame() >= totalPlaybackFrames) {
-                isPlaying_.store(false);
-                isPaused_.store(false);
-                metronome_.reset();
+            // If playing with tracks enabled, stop cleanly once all bars needed for the audio files/sections finish
+            if (playTracks) {
+                const int64_t framesPerBar = metronome_.getFramesPerBar();
+                const int64_t maxFrames = maxSongLengthFramesAtomic_.load(std::memory_order_relaxed);
+                if (framesPerBar > 0 && maxFrames > 0) {
+                    const int64_t audioBars = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(static_cast<double>(maxFrames) / static_cast<double>(framesPerBar))));
+                    const int64_t secBars = static_cast<int64_t>(sectionTotalBars_.load(std::memory_order_relaxed));
+                    const int64_t trackBars = std::max(audioBars, secBars);
+                    const int64_t totalPlaybackFrames = audioStartFrame + trackBars * framesPerBar;
+                    if (metronome_.getMetronomeFrame() >= totalPlaybackFrames) {
+                        isPlaying_.store(false);
+                        isPaused_.store(false);
+                        metronome_.reset();
+                        clearQueuedSectionLocked();
+                        trackJumpFadeSamplesRemaining_ = 0;
+                    }
+                }
             }
         }
     }

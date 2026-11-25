@@ -69,6 +69,7 @@ private:
     juce::Label attachmentHeader_{{}, "Arrangements:"};
     juce::ComboBox arrangementPicker_;
     juce::TextButton attachFolderButton_{"Add Arrangement"};
+    juce::TextButton editArrangementButton_{"Edit Arrangement"};
     juce::TextButton addSectionsButton_{"Track Sections"};
     juce::TextButton removeArrangementButton_{"Remove"};
     juce::Label attachmentStatusLabel_;
@@ -89,7 +90,9 @@ private:
     void updateAttachmentStatusAndButtons();
     void rebuildTrackWidgets();
     void saveCurrentSong();
+    void openArrangementDialog(std::optional<int> editIndex);
     void handleChooseFolder();
+    void handleEditArrangement();
     void handleAddSections();
     void handleRemoveArrangement();
 };

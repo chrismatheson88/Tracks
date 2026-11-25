@@ -1,5 +1,6 @@
 #include "LibraryView.h"
 #include "../../Common/AppTheme.h"
+#include "../../Models/AvailableSections.h"
 #include <algorithm>
 
 namespace tracks {
@@ -60,7 +61,7 @@ LibraryView::LibraryView(DatabaseService& db, AudioEngine& audioEngine)
     keyLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
     addAndMakeVisible(keyLabel_);
 
-    const char* keys[] = { "C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B",
+    const char* keys[] = { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
                            "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
     int kid = 1;
     for (const char* k : keys) {
@@ -101,6 +102,10 @@ LibraryView::LibraryView(DatabaseService& db, AudioEngine& audioEngine)
 
     attachFolderButton_.onClick = [this]() { handleChooseFolder(); };
     addAndMakeVisible(attachFolderButton_);
+
+    editArrangementButton_.setEnabled(false);
+    editArrangementButton_.onClick = [this]() { handleEditArrangement(); };
+    addAndMakeVisible(editArrangementButton_);
 
     addSectionsButton_.setEnabled(false);
     addSectionsButton_.onClick = [this]() { handleAddSections(); };
@@ -246,6 +251,7 @@ void LibraryView::refreshArrangementPicker() {
 void LibraryView::updateAttachmentStatusAndButtons() {
     const bool hasSelection = (selectedArrangementIndex_ >= 0 &&
                                selectedArrangementIndex_ < static_cast<int>(pendingArrangements_.size()));
+    editArrangementButton_.setEnabled(hasSelection);
     removeArrangementButton_.setEnabled(hasSelection);
 
     if (!hasSelection) {
@@ -300,14 +306,32 @@ void LibraryView::markDirty(bool dirty) {
 }
 
 void LibraryView::handleChooseFolder() {
-    class AddTracksDialogContent : public juce::Component {
+    openArrangementDialog(std::nullopt);
+}
+
+void LibraryView::handleEditArrangement() {
+    if (selectedArrangementIndex_ < 0 ||
+        selectedArrangementIndex_ >= static_cast<int>(pendingArrangements_.size())) {
+        return;
+    }
+    openArrangementDialog(selectedArrangementIndex_);
+}
+
+void LibraryView::openArrangementDialog(std::optional<int> editIndex) {
+    const bool isEditMode = editIndex.has_value() &&
+                            *editIndex >= 0 &&
+                            *editIndex < static_cast<int>(pendingArrangements_.size());
+
+    class ArrangementDialogContent : public juce::Component {
     public:
-        AddTracksDialogContent(const juce::String& initialName,
-                               int initialTempo,
-                               const juce::String& initialKey,
-                               const juce::String& initialTimeSig,
-                               std::function<void(SongArrangement, const juce::String&)> onConfirm)
-            : onConfirm_(std::move(onConfirm)) {
+        ArrangementDialogContent(bool editMode,
+                                 const SongArrangement& initialArr,
+                                 const juce::String& initialDir,
+                                 std::function<void(SongArrangement, bool, const juce::String&)> onConfirm)
+            : isEditMode_(editMode),
+              originalArr_(initialArr),
+              initialDir_(initialDir),
+              onConfirm_(std::move(onConfirm)) {
             setSize(500, 250);
 
             auto setupLbl = [this](juce::Label& l) {
@@ -318,15 +342,23 @@ void LibraryView::handleChooseFolder() {
 
             setupLbl(nameLabel_);
             nameEditor_.setJustification(juce::Justification::centredLeft);
-            nameEditor_.setText(initialName, false);
+            nameEditor_.setText(initialArr.name, false);
             nameEditor_.setTextToShowWhenEmpty("e.g. Loud Final Chorus, Quiet Ending...", AppTheme::textMuted.withAlpha(0.6f));
             addAndMakeVisible(nameEditor_);
 
             setupLbl(dirLabel_);
             dirEditor_.setJustification(juce::Justification::centredLeft);
-            dirEditor_.setTextToShowWhenEmpty("Select a folder with WAV, MP3, or M4A files...", AppTheme::textMuted.withAlpha(0.6f));
+            dirEditor_.setText(initialDir, false);
+            dirEditor_.setTextToShowWhenEmpty(
+                editMode ? "Keep current audio files, or browse to replace..."
+                         : "Select a folder with WAV, MP3, or M4A files...",
+                AppTheme::textMuted.withAlpha(0.6f));
             dirEditor_.onTextChange = [this]() {
-                addButton_.setEnabled(dirEditor_.getText().trim().isNotEmpty());
+                if (isEditMode_) {
+                    confirmButton_.setEnabled(true);
+                } else {
+                    confirmButton_.setEnabled(dirEditor_.getText().trim().isNotEmpty());
+                }
             };
             addAndMakeVisible(dirEditor_);
 
@@ -337,18 +369,18 @@ void LibraryView::handleChooseFolder() {
             setupLbl(tempoLabel_);
             tempoEditor_.setJustification(juce::Justification::centred);
             tempoEditor_.setInputRestrictions(3, "0123456789");
-            tempoEditor_.setText(juce::String(initialTempo > 0 ? initialTempo : 120), false);
+            tempoEditor_.setText(juce::String(initialArr.tempo > 0 ? initialArr.tempo : 120), false);
             addAndMakeVisible(tempoEditor_);
 
             setupLbl(keyLabel_);
-            const char* keys[] = { "C", "C#", "Db", "D", "Eb", "E", "F", "F#", "Gb", "G", "Ab", "A", "Bb", "B",
+            const char* keys[] = { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B",
                                    "Am", "Bbm", "Bm", "Cm", "C#m", "Dm", "Ebm", "Em", "Fm", "F#m", "Gm", "Abm" };
             int kid = 1;
             for (const char* k : keys) {
                 keyBox_.addItem(k, kid++);
             }
-            if (initialKey.isNotEmpty()) {
-                keyBox_.setText(initialKey, juce::dontSendNotification);
+            if (!initialArr.key.empty()) {
+                keyBox_.setText(initialArr.key, juce::dontSendNotification);
             } else {
                 keyBox_.setSelectedId(1, juce::dontSendNotification);
             }
@@ -360,8 +392,8 @@ void LibraryView::handleChooseFolder() {
             for (const char* s : sigs) {
                 timeSigBox_.addItem(s, sid++);
             }
-            if (initialTimeSig.isNotEmpty()) {
-                timeSigBox_.setText(initialTimeSig, juce::dontSendNotification);
+            if (!initialArr.timeSignature.empty()) {
+                timeSigBox_.setText(initialArr.timeSignature, juce::dontSendNotification);
             } else {
                 timeSigBox_.setSelectedId(1, juce::dontSendNotification);
             }
@@ -369,16 +401,21 @@ void LibraryView::handleChooseFolder() {
 
             statusLabel_.setFont(juce::Font(11.5f, juce::Font::plain));
             statusLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+            if (isEditMode_ && !originalArr_.tracks.empty()) {
+                statusLabel_.setText(juce::String(originalArr_.tracks.size()) + " existing audio file(s) attached (browse to replace)",
+                                     juce::dontSendNotification);
+            }
             addAndMakeVisible(statusLabel_);
 
             cancelButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
             cancelButton_.onClick = [this]() { closeDialog(); };
             addAndMakeVisible(cancelButton_);
 
-            addButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
-            addButton_.setEnabled(false);
-            addButton_.onClick = [this]() { confirmSelection(); };
-            addAndMakeVisible(addButton_);
+            confirmButton_.setButtonText(isEditMode_ ? "Save Changes" : "Add Arrangement");
+            confirmButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
+            confirmButton_.setEnabled(isEditMode_);
+            confirmButton_.onClick = [this]() { confirmSelection(); };
+            addAndMakeVisible(confirmButton_);
         }
 
         void paint(juce::Graphics& g) override {
@@ -416,12 +453,16 @@ void LibraryView::handleChooseFolder() {
             statusLabel_.setBounds(area.removeFromTop(32));
 
             auto bottomRow = area.removeFromBottom(32);
-            addButton_.setBounds(bottomRow.removeFromRight(128));
+            confirmButton_.setBounds(bottomRow.removeFromRight(128));
             bottomRow.removeFromRight(8);
             cancelButton_.setBounds(bottomRow.removeFromRight(84));
         }
 
     private:
+        bool isEditMode_ = false;
+        SongArrangement originalArr_;
+        juce::String initialDir_;
+
         juce::Label nameLabel_{{}, "Arrangement:"};
         juce::TextEditor nameEditor_;
 
@@ -440,10 +481,10 @@ void LibraryView::handleChooseFolder() {
 
         juce::Label statusLabel_;
         juce::TextButton cancelButton_{"Cancel"};
-        juce::TextButton addButton_{"Add Arrangement"};
+        juce::TextButton confirmButton_{"Add Arrangement"};
 
         std::unique_ptr<juce::FileChooser> chooser_;
-        std::function<void(SongArrangement, const juce::String&)> onConfirm_;
+        std::function<void(SongArrangement, bool, const juce::String&)> onConfirm_;
 
         void openFolderChooser() {
             auto startDir = dirEditor_.getText().trim().isNotEmpty()
@@ -456,7 +497,7 @@ void LibraryView::handleChooseFolder() {
             chooser_ = std::make_unique<juce::FileChooser>("Select Audio Folder with Stems", startDir);
             auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories;
 
-            juce::Component::SafePointer<AddTracksDialogContent> safeThis(this);
+            juce::Component::SafePointer<ArrangementDialogContent> safeThis(this);
             chooser_->launchAsync(flags, [safeThis](const juce::FileChooser& fc) {
                 if (safeThis == nullptr) return;
                 auto result = fc.getResult();
@@ -467,7 +508,7 @@ void LibraryView::handleChooseFolder() {
                 if (insp.error.has_value()) {
                     safeThis->statusLabel_.setColour(juce::Label::textColourId, AppTheme::dangerRed);
                     safeThis->statusLabel_.setText(*insp.error, juce::dontSendNotification);
-                    safeThis->addButton_.setEnabled(false);
+                    safeThis->confirmButton_.setEnabled(false);
                 } else {
                     int monoCount = 0;
                     int stereoCount = 0;
@@ -490,46 +531,53 @@ void LibraryView::handleChooseFolder() {
                         safeThis->statusLabel_.setColour(juce::Label::textColourId, AppTheme::accentGreen);
                     }
                     safeThis->statusLabel_.setText(msg, juce::dontSendNotification);
-                    safeThis->addButton_.setEnabled(true);
+                    safeThis->confirmButton_.setEnabled(true);
                 }
             });
         }
 
         void confirmSelection() {
-            auto dirPath = dirEditor_.getText().trim().toStdString();
-            auto insp = AudioAttachmentService::inspectAudioDirectory(dirPath);
-            if (insp.error.has_value()) {
-                statusLabel_.setColour(juce::Label::textColourId, AppTheme::dangerRed);
-                statusLabel_.setText(*insp.error, juce::dontSendNotification);
-                return;
-            }
+            auto dirText = dirEditor_.getText().trim();
+            const bool dirChanged = (!isEditMode_) || (dirText.isNotEmpty() && dirText != initialDir_);
 
-            SongArrangement arr;
+            SongArrangement arr = isEditMode_ ? originalArr_ : SongArrangement{};
             arr.name = nameEditor_.getText().trim().toStdString();
             if (arr.name.empty()) arr.name = "Main";
-            arr.tempo = std::clamp(tempoEditor_.getText().trim().getIntValue(), 20, 300);
-            if (tempoEditor_.getText().trim().getIntValue() <= 0) arr.tempo = 120;
+            int parsedTempo = tempoEditor_.getText().trim().getIntValue();
+            arr.tempo = (parsedTempo > 0) ? std::clamp(parsedTempo, 20, 300) : 120;
             arr.key = keyBox_.getText().toStdString();
             if (arr.key.empty()) arr.key = "C";
             arr.timeSignature = timeSigBox_.getText().toStdString();
             if (arr.timeSignature.empty()) arr.timeSignature = "4/4";
-            arr.clickEighths = false;
-            arr.clickSixteenths = false;
-            arr.clickEighthsGain = 1.0f;
-            arr.clickSixteenthsGain = 1.0f;
 
-            for (auto& track : insp.tracks) {
-                track.trackKey = arr.key;
-            }
-            arr.tracks = std::move(insp.tracks);
+            juce::String status;
+            bool filesReplacedOrRenamed = (isEditMode_ && arr.name != originalArr_.name);
 
-            juce::String status = juce::String(arr.tracks.size()) + " audio file(s) ready for \"" + juce::String(arr.name) + "\"";
-            if (!insp.mismatches.empty()) {
-                status += " — " + juce::String(insp.mismatches[0]);
+            if (dirChanged) {
+                auto insp = AudioAttachmentService::inspectAudioDirectory(dirText.toStdString());
+                if (insp.error.has_value()) {
+                    statusLabel_.setColour(juce::Label::textColourId, AppTheme::dangerRed);
+                    statusLabel_.setText(*insp.error, juce::dontSendNotification);
+                    return;
+                }
+                for (auto& track : insp.tracks) {
+                    track.trackKey = arr.key;
+                }
+                arr.tracks = std::move(insp.tracks);
+                filesReplacedOrRenamed = true;
+
+                status = juce::String(arr.tracks.size()) + " audio file(s) ready for \"" + juce::String(arr.name) + "\"";
+                if (!insp.mismatches.empty()) {
+                    status += " — " + juce::String(insp.mismatches[0]);
+                }
+            } else {
+                for (auto& track : arr.tracks) {
+                    track.trackKey = arr.key;
+                }
             }
 
             if (onConfirm_) {
-                onConfirm_(std::move(arr), status);
+                onConfirm_(std::move(arr), filesReplacedOrRenamed, status);
             }
             closeDialog();
         }
@@ -541,25 +589,42 @@ void LibraryView::handleChooseFolder() {
         }
     };
 
-    juce::String defaultName = pendingArrangements_.empty()
-                                   ? juce::String("Main")
-                                   : ("Arrangement " + juce::String(pendingArrangements_.size() + 1));
-    int defaultTempo = tempoEditor_.getText().trim().getIntValue();
-    if (defaultTempo <= 0) defaultTempo = 120;
-    juce::String defaultKey = keyBox_.getText();
-    juce::String defaultTimeSig = timeSigBox_.getText();
+    SongArrangement initialArr;
+    juce::String initialDir;
+    if (isEditMode) {
+        initialArr = pendingArrangements_[static_cast<size_t>(*editIndex)];
+        if (!initialArr.tracks.empty() && !initialArr.tracks[0].filePath.empty()) {
+            initialDir = juce::File(initialArr.tracks[0].filePath).getParentDirectory().getFullPathName();
+        }
+    } else {
+        initialArr.name = pendingArrangements_.empty()
+                              ? "Main"
+                              : ("Arrangement " + std::to_string(pendingArrangements_.size() + 1));
+        int defaultTempo = tempoEditor_.getText().trim().getIntValue();
+        initialArr.tempo = (defaultTempo > 0) ? defaultTempo : 120;
+        initialArr.key = keyBox_.getText().toStdString();
+        if (initialArr.key.empty()) initialArr.key = "C";
+        initialArr.timeSignature = timeSigBox_.getText().toStdString();
+        if (initialArr.timeSignature.empty()) initialArr.timeSignature = "4/4";
+    }
 
     juce::Component::SafePointer<LibraryView> safeView(this);
-    auto* content = new AddTracksDialogContent(
-        defaultName,
-        defaultTempo,
-        defaultKey,
-        defaultTimeSig,
-        [safeView](SongArrangement newArr, const juce::String& status) {
+    auto* content = new ArrangementDialogContent(
+        isEditMode,
+        initialArr,
+        initialDir,
+        [safeView, editIndex, isEditMode](SongArrangement updatedArr, bool filesChanged, const juce::String& status) {
             if (safeView == nullptr) return;
-            safeView->pendingArrangements_.push_back(std::move(newArr));
-            safeView->selectedArrangementIndex_ = static_cast<int>(safeView->pendingArrangements_.size()) - 1;
-            safeView->tracksModified_ = true;
+            if (isEditMode && *editIndex >= 0 && *editIndex < static_cast<int>(safeView->pendingArrangements_.size())) {
+                safeView->pendingArrangements_[static_cast<size_t>(*editIndex)] = std::move(updatedArr);
+                safeView->selectedArrangementIndex_ = *editIndex;
+            } else {
+                safeView->pendingArrangements_.push_back(std::move(updatedArr));
+                safeView->selectedArrangementIndex_ = static_cast<int>(safeView->pendingArrangements_.size()) - 1;
+            }
+            if (filesChanged || !isEditMode) {
+                safeView->tracksModified_ = true;
+            }
             safeView->refreshArrangementPicker();
             safeView->updateAttachmentStatusAndButtons();
             if (status.isNotEmpty()) {
@@ -570,7 +635,7 @@ void LibraryView::handleChooseFolder() {
         });
 
     juce::DialogWindow::LaunchOptions options;
-    options.dialogTitle = "Add Arrangement";
+    options.dialogTitle = isEditMode ? "Edit Arrangement" : "Add Arrangement";
     options.content.setOwned(content);
     options.componentToCentreAround = getTopLevelComponent();
     options.dialogBackgroundColour = AppTheme::bgDark;
@@ -589,74 +654,68 @@ void LibraryView::handleAddSections() {
         return;
     }
 
-    class AddSectionsDialogContent : public juce::Component, public juce::ListBoxModel {
+    class AddSectionsDialogContent : public juce::Component {
     public:
         AddSectionsDialogContent(std::vector<SongSection> initialSections,
                                  std::function<void(std::vector<SongSection>)> onConfirm)
             : sections_(std::move(initialSections)), onConfirm_(std::move(onConfirm)) {
-            setSize(480, 400);
+            setSize(520, 440);
 
-            nameLabel_.setFont(juce::Font(11.5f, juce::Font::bold));
-            nameLabel_.setColour(juce::Label::textColourId, AppTheme::textLight);
-            addAndMakeVisible(nameLabel_);
+            auto setupColHdr = [this](juce::Label& l, juce::Justification just) {
+                l.setFont(juce::Font(11.0f, juce::Font::bold));
+                l.setColour(juce::Label::textColourId, AppTheme::textMuted);
+                l.setJustificationType(just);
+                addAndMakeVisible(l);
+            };
+            setupColHdr(colNumLabel_, juce::Justification::centredLeft);
+            setupColHdr(colNameLabel_, juce::Justification::centredLeft);
+            setupColHdr(colBarsLabel_, juce::Justification::centredLeft);
 
-            nameEditor_.setJustification(juce::Justification::centredLeft);
-            nameEditor_.setTextToShowWhenEmpty("e.g. Intro, Verse 1, Chorus...", AppTheme::textMuted.withAlpha(0.6f));
-            nameEditor_.onReturnKey = [this]() { addSectionFromInputs(); };
-            addAndMakeVisible(nameEditor_);
-
-            barsLabel_.setFont(juce::Font(11.5f, juce::Font::bold));
-            barsLabel_.setColour(juce::Label::textColourId, AppTheme::textLight);
-            addAndMakeVisible(barsLabel_);
-
-            barsEditor_.setJustification(juce::Justification::centred);
-            barsEditor_.setInputRestrictions(4, "0123456789");
-            barsEditor_.setText("4", false);
-            barsEditor_.onReturnKey = [this]() { addSectionFromInputs(); };
-            addAndMakeVisible(barsEditor_);
-
-            addSectionButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
-            addSectionButton_.onClick = [this]() { addSectionFromInputs(); };
-            addAndMakeVisible(addSectionButton_);
+            rowsContent_ = std::make_unique<RowsContainer>(*this);
+            viewport_.setViewedComponent(rowsContent_.get(), false);
+            viewport_.setScrollBarsShown(true, false);
+            viewport_.setScrollBarThickness(8);
+            viewport_.onScrolled = [this]() {
+                if (isDropdownVisible()) {
+                    positionDropdown();
+                }
+            };
+            addAndMakeVisible(viewport_);
 
             errorLabel_.setFont(juce::Font(11.0f, juce::Font::plain));
             errorLabel_.setColour(juce::Label::textColourId, AppTheme::dangerRed);
             addAndMakeVisible(errorLabel_);
 
-            listBox_.setModel(this);
-            listBox_.setRowHeight(30);
-            addAndMakeVisible(listBox_);
-
             moveUpButton_.onClick = [this]() {
-                int sel = listBox_.getSelectedRow();
-                if (sel <= 0 || sel >= static_cast<int>(sections_.size())) return;
-                std::swap(sections_[static_cast<size_t>(sel)], sections_[static_cast<size_t>(sel - 1)]);
+                hideDropdown();
+                if (selectedRow_ <= 0 || selectedRow_ >= static_cast<int>(sections_.size())) return;
+                std::swap(sections_[static_cast<size_t>(selectedRow_)], sections_[static_cast<size_t>(selectedRow_ - 1)]);
                 reindexSections();
-                listBox_.updateContent();
-                listBox_.selectRow(sel - 1);
+                selectedRow_--;
+                refreshRowsLayout(false);
                 updateSummary();
             };
             addAndMakeVisible(moveUpButton_);
 
             moveDownButton_.onClick = [this]() {
-                int sel = listBox_.getSelectedRow();
-                if (sel < 0 || sel >= static_cast<int>(sections_.size()) - 1) return;
-                std::swap(sections_[static_cast<size_t>(sel)], sections_[static_cast<size_t>(sel + 1)]);
+                hideDropdown();
+                if (selectedRow_ < 0 || selectedRow_ >= static_cast<int>(sections_.size()) - 1) return;
+                std::swap(sections_[static_cast<size_t>(selectedRow_)], sections_[static_cast<size_t>(selectedRow_ + 1)]);
                 reindexSections();
-                listBox_.updateContent();
-                listBox_.selectRow(sel + 1);
+                selectedRow_++;
+                refreshRowsLayout(false);
                 updateSummary();
             };
             addAndMakeVisible(moveDownButton_);
 
             removeButton_.setColour(juce::TextButton::buttonColourId, AppTheme::dangerRed);
             removeButton_.onClick = [this]() {
-                int sel = listBox_.getSelectedRow();
-                if (sel < 0 || sel >= static_cast<int>(sections_.size())) return;
-                sections_.erase(sections_.begin() + sel);
+                hideDropdown();
+                if (selectedRow_ < 0 || selectedRow_ >= static_cast<int>(sections_.size())) return;
+                sections_.erase(sections_.begin() + selectedRow_);
                 reindexSections();
-                listBox_.updateContent();
-                listBox_.deselectAllRows();
+                selectedRow_ = -1;
+                refreshRowsLayout(false);
                 updateSummary();
             };
             addAndMakeVisible(removeButton_);
@@ -672,9 +731,9 @@ void LibraryView::handleAddSections() {
 
             doneButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
             doneButton_.onClick = [this]() {
-                // If user typed a section name but clicked Done before clicking Add, include it too
-                auto pendingName = nameEditor_.getText().trim().toStdString();
-                int pendingBars = barsEditor_.getText().trim().getIntValue();
+                // If user picked a valid section on the inline next row and clicked Done before Add, include it too
+                std::string pendingName = findCanonicalSectionName(rowsContent_->getFilterText());
+                int pendingBars = rowsContent_->getBarsValue();
                 if (!pendingName.empty() && pendingBars > 0) {
                     SongSection sec;
                     sec.name = pendingName;
@@ -691,71 +750,41 @@ void LibraryView::handleAddSections() {
             };
             addAndMakeVisible(doneButton_);
 
+            dropdownOverlay_ = std::make_unique<DropdownOverlay>(*this);
+            dropdownOverlay_->setAlwaysOnTop(true);
+            addChildComponent(dropdownOverlay_.get());
+
             updateSummary();
-        }
-
-        int getNumRows() override {
-            return static_cast<int>(sections_.size());
-        }
-
-        void paintListBoxItem(int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected) override {
-            if (rowNumber < 0 || rowNumber >= static_cast<int>(sections_.size())) return;
-
-            if (rowIsSelected) {
-                g.setColour(AppTheme::primaryBlue.withAlpha(0.25f));
-                g.fillRect(0, 0, width, height);
-            }
-
-            int startBar = 1;
-            for (int i = 0; i < rowNumber; ++i) {
-                startBar += std::max(1, sections_[static_cast<size_t>(i)].lengthBars);
-            }
-            const auto& sec = sections_[static_cast<size_t>(rowNumber)];
-            int len = std::max(1, sec.lengthBars);
-            int endBar = startBar + len - 1;
-
-            g.setFont(juce::Font(12.0f, juce::Font::bold));
-            g.setColour(AppTheme::primaryBlue);
-            g.drawText(juce::String(rowNumber + 1) + ".", 8, 0, 24, height, juce::Justification::centredLeft);
-
-            g.setFont(juce::Font(12.5f, juce::Font::bold));
-            g.setColour(AppTheme::textLight);
-            g.drawText(sec.name, 34, 0, width - 210, height, juce::Justification::centredLeft, true);
-
-            juce::String barInfo = juce::String(len) + (len == 1 ? " bar" : " bars") +
-                                   "  (Bars " + juce::String(startBar) + "-" + juce::String(endBar) + ")";
-            g.setFont(juce::Font(11.5f, juce::Font::plain));
-            g.setColour(AppTheme::textMuted);
-            g.drawText(barInfo, width - 180, 0, 170, height, juce::Justification::centredRight, true);
-
-            g.setColour(AppTheme::borderCol.withAlpha(0.6f));
-            g.drawHorizontalLine(height - 1, 0.0f, static_cast<float>(width));
+            refreshRowsLayout(true);
         }
 
         void paint(juce::Graphics& g) override {
             g.fillAll(AppTheme::bgDark);
+
+            // Subtle frame around the section list viewport
+            if (!listFrameBounds_.isEmpty()) {
+                auto r = listFrameBounds_.toFloat().reduced(0.5f);
+                g.setColour(AppTheme::bgPanel);
+                g.fillRoundedRectangle(r, 4.0f);
+                g.setColour(AppTheme::borderCol);
+                g.drawRoundedRectangle(r, 4.0f, 1.0f);
+            }
+        }
+
+        void mouseDown(const juce::MouseEvent&) override {
+            hideDropdown();
         }
 
         void resized() override {
             auto area = getLocalBounds().reduced(16);
 
-            auto labelRow = area.removeFromTop(18);
-            nameLabel_.setBounds(labelRow.removeFromLeft(260));
-            labelRow.removeFromLeft(8);
-            barsLabel_.setBounds(labelRow.removeFromLeft(80));
+            auto colRow = area.removeFromTop(18);
+            colNumLabel_.setBounds(colRow.removeFromLeft(34));
+            colNameLabel_.setBounds(colRow.removeFromLeft(252));
+            colRow.removeFromLeft(8);
+            colBarsLabel_.setBounds(colRow);
 
             area.removeFromTop(4);
-
-            auto inputRow = area.removeFromTop(28);
-            addSectionButton_.setBounds(inputRow.removeFromRight(80));
-            inputRow.removeFromRight(8);
-            barsEditor_.setBounds(inputRow.removeFromRight(68));
-            inputRow.removeFromRight(8);
-            nameEditor_.setBounds(inputRow);
-
-            area.removeFromTop(4);
-            errorLabel_.setBounds(area.removeFromTop(16));
-            area.removeFromTop(6);
 
             auto bottomRow = area.removeFromBottom(32);
             doneButton_.setBounds(bottomRow.removeFromRight(92));
@@ -763,7 +792,7 @@ void LibraryView::handleAddSections() {
             cancelButton_.setBounds(bottomRow.removeFromRight(82));
             summaryLabel_.setBounds(bottomRow);
 
-            area.removeFromBottom(10);
+            area.removeFromBottom(8);
 
             auto editRow = area.removeFromBottom(26);
             moveUpButton_.setBounds(editRow.removeFromLeft(82));
@@ -772,22 +801,381 @@ void LibraryView::handleAddSections() {
             editRow.removeFromLeft(6);
             removeButton_.setBounds(editRow.removeFromLeft(78));
 
-            area.removeFromBottom(10);
-            listBox_.setBounds(area);
+            area.removeFromBottom(6);
+            errorLabel_.setBounds(area.removeFromBottom(16));
+            area.removeFromBottom(6);
+
+            listFrameBounds_ = area;
+            viewport_.setBounds(area.reduced(1));
+            refreshRowsLayout(false);
+            if (dropdownOverlay_->isVisible()) {
+                positionDropdown();
+            }
         }
 
     private:
+        enum { kRowHeight = 34 };
+
+        class SectionListViewport : public juce::Viewport {
+        public:
+            std::function<void()> onScrolled;
+            void visibleAreaChanged(const juce::Rectangle<int>&) override {
+                if (onScrolled) onScrolled();
+            }
+        };
+
+        class FilterTextEditor : public juce::TextEditor {
+        public:
+            std::function<bool(const juce::KeyPress&)> onKeyInterceptor;
+            std::function<void()> onMouseClick;
+
+            bool keyPressed(const juce::KeyPress& key) override {
+                if (onKeyInterceptor && onKeyInterceptor(key)) {
+                    return true;
+                }
+                return juce::TextEditor::keyPressed(key);
+            }
+
+            void mouseDown(const juce::MouseEvent& e) override {
+                juce::TextEditor::mouseDown(e);
+                if (onMouseClick) onMouseClick();
+            }
+        };
+
+        class DropdownToggleButton : public juce::Button {
+        public:
+            DropdownToggleButton() : juce::Button("Dropdown") {
+                setWantsKeyboardFocus(false);
+            }
+
+            void paintButton(juce::Graphics& g, bool highlighted, bool down) override {
+                auto r = getLocalBounds().toFloat().reduced(0.5f);
+                juce::Colour bg = AppTheme::bgInput;
+                if (down) bg = bg.darker(0.15f);
+                else if (highlighted) bg = bg.brighter(0.12f);
+                g.setColour(bg);
+                g.fillRoundedRectangle(r, 3.0f);
+                g.setColour(AppTheme::borderCol);
+                g.drawRoundedRectangle(r, 3.0f, 1.0f);
+
+                const float cx = r.getCentreX();
+                const float cy = r.getCentreY();
+                juce::Path tri;
+                tri.addTriangle(cx - 4.0f, cy - 2.0f, cx + 4.0f, cy - 2.0f, cx, cy + 3.0f);
+                g.setColour(AppTheme::textLight);
+                g.fillPath(tri);
+            }
+        };
+
+        class DropdownOverlay : public juce::Component, public juce::ListBoxModel {
+        public:
+            explicit DropdownOverlay(AddSectionsDialogContent& owner) : owner_(owner) {
+                setWantsKeyboardFocus(false);
+                list_.setModel(this);
+                list_.setRowHeight(24);
+                list_.setWantsKeyboardFocus(false);
+                list_.setColour(juce::ListBox::backgroundColourId, AppTheme::bgPanel.darker(0.15f));
+                addAndMakeVisible(list_);
+            }
+
+            void setItems(std::vector<std::string> items, const std::string& highlightItem = "") {
+                items_ = std::move(items);
+                highlightedRow_ = items_.empty() ? -1 : 0;
+                if (!highlightItem.empty()) {
+                    for (size_t i = 0; i < items_.size(); ++i) {
+                        if (items_[i] == highlightItem) {
+                            highlightedRow_ = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                }
+                list_.updateContent();
+                if (highlightedRow_ >= 0) {
+                    list_.scrollToEnsureRowIsOnscreen(highlightedRow_);
+                }
+                repaint();
+            }
+
+            void moveHighlight(int delta) {
+                if (items_.empty()) return;
+                if (highlightedRow_ < 0) highlightedRow_ = 0;
+                else highlightedRow_ = std::clamp(highlightedRow_ + delta, 0, static_cast<int>(items_.size()) - 1);
+                list_.scrollToEnsureRowIsOnscreen(highlightedRow_);
+                list_.repaint();
+            }
+
+            std::string getHighlightedItem() const {
+                if (highlightedRow_ >= 0 && highlightedRow_ < static_cast<int>(items_.size())) {
+                    return items_[static_cast<size_t>(highlightedRow_)];
+                }
+                return {};
+            }
+
+            int getDesiredHeight() const {
+                int rows = std::max(1, std::min(7, static_cast<int>(items_.size())));
+                return rows * 24 + 4;
+            }
+
+            int getNumRows() override {
+                return items_.empty() ? 1 : static_cast<int>(items_.size());
+            }
+
+            void paintListBoxItem(int rowNumber, juce::Graphics& g, int width, int height, bool) override {
+                if (items_.empty()) {
+                    g.setFont(juce::Font(11.5f, juce::Font::italic));
+                    g.setColour(AppTheme::textMuted);
+                    g.drawText("No matching sections", 8, 0, width - 16, height, juce::Justification::centredLeft, true);
+                    return;
+                }
+                if (rowNumber < 0 || rowNumber >= static_cast<int>(items_.size())) return;
+
+                const bool isHighlighted = (rowNumber == highlightedRow_);
+                if (isHighlighted) {
+                    g.setColour(AppTheme::primaryBlue.withAlpha(0.35f));
+                    g.fillRect(0, 0, width, height);
+                }
+
+                g.setFont(juce::Font(12.0f, isHighlighted ? juce::Font::bold : juce::Font::plain));
+                g.setColour(isHighlighted ? juce::Colours::white : AppTheme::textLight);
+                g.drawText(items_[static_cast<size_t>(rowNumber)], 8, 0, width - 16, height,
+                           juce::Justification::centredLeft, true);
+            }
+
+            void listBoxItemClicked(int row, const juce::MouseEvent&) override {
+                if (row >= 0 && row < static_cast<int>(items_.size())) {
+                    owner_.commitDropdownSelection(items_[static_cast<size_t>(row)]);
+                }
+            }
+
+            void paint(juce::Graphics& g) override {
+                auto r = getLocalBounds().toFloat().reduced(0.5f);
+                g.setColour(AppTheme::bgPanel.darker(0.15f));
+                g.fillRoundedRectangle(r, 4.0f);
+                g.setColour(AppTheme::primaryBlue.withAlpha(0.75f));
+                g.drawRoundedRectangle(r, 4.0f, 1.2f);
+            }
+
+            void resized() override {
+                list_.setBounds(getLocalBounds().reduced(2));
+            }
+
+        private:
+            AddSectionsDialogContent& owner_;
+            juce::ListBox list_;
+            std::vector<std::string> items_;
+            int highlightedRow_ = -1;
+        };
+
+        class RowsContainer : public juce::Component {
+        public:
+            explicit RowsContainer(AddSectionsDialogContent& owner) : owner_(owner) {
+                filterEditor_.setJustification(juce::Justification::centredLeft);
+                filterEditor_.setTextToShowWhenEmpty("Type or select section...", AppTheme::textMuted.withAlpha(0.6f));
+                filterEditor_.onTextChange = [this]() {
+                    owner_.onFilterTextChanged();
+                };
+                filterEditor_.onFocusLost = [this]() {
+                    owner_.hideDropdown();
+                };
+                filterEditor_.onMouseClick = [this]() {
+                    owner_.openDropdownForCurrentText(false);
+                };
+                filterEditor_.onKeyInterceptor = [this](const juce::KeyPress& key) -> bool {
+                    if (key == juce::KeyPress::downKey) {
+                        if (!owner_.isDropdownVisible()) {
+                            owner_.openDropdownForCurrentText(false);
+                        } else {
+                            owner_.moveDropdownHighlight(1);
+                        }
+                        return true;
+                    }
+                    if (key == juce::KeyPress::upKey) {
+                        if (owner_.isDropdownVisible()) {
+                            owner_.moveDropdownHighlight(-1);
+                            return true;
+                        }
+                    }
+                    if (key == juce::KeyPress::escapeKey) {
+                        if (owner_.isDropdownVisible()) {
+                            owner_.hideDropdown();
+                            return true;
+                        }
+                    }
+                    if (key == juce::KeyPress::returnKey) {
+                        if (owner_.isDropdownVisible()) {
+                            std::string picked = owner_.getDropdownHighlightedItem();
+                            if (!picked.empty()) {
+                                owner_.commitDropdownSelection(picked);
+                                return true;
+                            }
+                        }
+                        owner_.addSectionFromInputs();
+                        return true;
+                    }
+                    return false;
+                };
+                addAndMakeVisible(filterEditor_);
+
+                dropdownBtn_.onClick = [this]() {
+                    if (owner_.isDropdownVisible()) {
+                        owner_.hideDropdown();
+                    } else {
+                        filterEditor_.grabKeyboardFocus();
+                        owner_.openDropdownForCurrentText(true);
+                    }
+                };
+                addAndMakeVisible(dropdownBtn_);
+
+                barsEditor_.setJustification(juce::Justification::centred);
+                barsEditor_.setInputRestrictions(4, "0123456789");
+                barsEditor_.setText("4", false);
+                barsEditor_.onReturnKey = [this]() {
+                    owner_.addSectionFromInputs();
+                };
+                addAndMakeVisible(barsEditor_);
+
+                barsUnitLabel_.setFont(juce::Font(11.0f, juce::Font::plain));
+                barsUnitLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+                barsUnitLabel_.setJustificationType(juce::Justification::centredLeft);
+                addAndMakeVisible(barsUnitLabel_);
+
+                addBtn_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
+                addBtn_.onClick = [this]() {
+                    owner_.addSectionFromInputs();
+                };
+                addAndMakeVisible(addBtn_);
+            }
+
+            std::string getFilterText() const { return filterEditor_.getText().trim().toStdString(); }
+            void setFilterText(const std::string& text) { filterEditor_.setText(text, false); }
+            int getBarsValue() const { return barsEditor_.getText().trim().getIntValue(); }
+
+            void focusFilterEditor() {
+                filterEditor_.grabKeyboardFocus();
+            }
+
+            void focusBarsEditorAndSelectAll() {
+                barsEditor_.grabKeyboardFocus();
+                barsEditor_.selectAll();
+            }
+
+            juce::Rectangle<int> getDropdownAnchorBounds() const {
+                return filterEditor_.getBounds().getUnion(dropdownBtn_.getBounds());
+            }
+
+            void layoutInlineRow() {
+                const int n = static_cast<int>(owner_.sections_.size());
+                const int y = n * kRowHeight;
+                auto row = juce::Rectangle<int>(0, y, getWidth(), kRowHeight).reduced(6, 4);
+
+                row.removeFromLeft(28); // Room for row number "N."
+                auto addBounds = row.removeFromRight(58);
+                row.removeFromRight(6);
+                auto unitBounds = row.removeFromRight(32);
+                row.removeFromRight(4);
+                auto barsBounds = row.removeFromRight(52);
+                row.removeFromRight(10);
+
+                auto dropBtnBounds = row.removeFromRight(24);
+                row.removeFromRight(2);
+                auto filterBounds = row;
+
+                filterEditor_.setBounds(filterBounds);
+                dropdownBtn_.setBounds(dropBtnBounds);
+                barsEditor_.setBounds(barsBounds);
+                barsUnitLabel_.setBounds(unitBounds);
+                addBtn_.setBounds(addBounds);
+            }
+
+            void paint(juce::Graphics& g) override {
+                const int w = getWidth();
+                int startBar = 1;
+
+                for (int i = 0; i < static_cast<int>(owner_.sections_.size()); ++i) {
+                    const int y = i * kRowHeight;
+                    const auto& sec = owner_.sections_[static_cast<size_t>(i)];
+                    const int len = std::max(1, sec.lengthBars);
+                    const int endBar = startBar + len - 1;
+
+                    if (i == owner_.selectedRow_) {
+                        g.setColour(AppTheme::primaryBlue.withAlpha(0.25f));
+                        g.fillRect(0, y, w, kRowHeight);
+                    } else if (i % 2 == 1) {
+                        g.setColour(AppTheme::bgDark.withAlpha(0.28f));
+                        g.fillRect(0, y, w, kRowHeight);
+                    }
+
+                    g.setFont(juce::Font(12.0f, juce::Font::bold));
+                    g.setColour(AppTheme::primaryBlue);
+                    g.drawText(juce::String(i + 1) + ".", 8, y, 26, kRowHeight, juce::Justification::centredLeft);
+
+                    g.setFont(juce::Font(12.5f, juce::Font::bold));
+                    g.setColour(sec.isCountSection() ? AppTheme::warningAmber : AppTheme::textLight);
+                    g.drawText(sec.name, 34, y, w - 210, kRowHeight, juce::Justification::centredLeft, true);
+
+                    juce::String barInfo = juce::String(len) + (len == 1 ? " bar" : " bars") +
+                                           "  (Bars " + juce::String(startBar) + "-" + juce::String(endBar) + ")";
+                    g.setFont(juce::Font(11.5f, juce::Font::plain));
+                    g.setColour(AppTheme::textMuted);
+                    g.drawText(barInfo, w - 180, y, 170, kRowHeight, juce::Justification::centredRight, true);
+
+                    g.setColour(AppTheme::borderCol.withAlpha(0.55f));
+                    g.drawHorizontalLine(y + kRowHeight - 1, 0.0f, static_cast<float>(w));
+
+                    startBar += len;
+                }
+
+                // Inline "next available row" highlight & index number
+                const int nextIdx = static_cast<int>(owner_.sections_.size());
+                const int nextY = nextIdx * kRowHeight;
+                g.setColour(AppTheme::primaryBlue.withAlpha(0.08f));
+                g.fillRect(0, nextY, w, kRowHeight);
+                g.setFont(juce::Font(12.0f, juce::Font::bold));
+                g.setColour(AppTheme::primaryBlue.brighter(0.2f));
+                g.drawText(juce::String(nextIdx + 1) + ".", 8, nextY, 26, kRowHeight, juce::Justification::centredLeft);
+                g.setColour(AppTheme::borderCol.withAlpha(0.45f));
+                g.drawHorizontalLine(nextY + kRowHeight - 1, 0.0f, static_cast<float>(w));
+            }
+
+            void mouseDown(const juce::MouseEvent& e) override {
+                owner_.hideDropdown();
+                int clickedRow = e.y / kRowHeight;
+                if (clickedRow >= 0 && clickedRow < static_cast<int>(owner_.sections_.size())) {
+                    owner_.selectedRow_ = clickedRow;
+                    repaint();
+                } else {
+                    owner_.selectedRow_ = -1;
+                    repaint();
+                }
+            }
+
+            void resized() override {
+                layoutInlineRow();
+            }
+
+        private:
+            AddSectionsDialogContent& owner_;
+            FilterTextEditor filterEditor_;
+            DropdownToggleButton dropdownBtn_;
+            juce::TextEditor barsEditor_;
+            juce::Label barsUnitLabel_{{}, "bars"};
+            juce::TextButton addBtn_{"Add"};
+        };
+
         std::vector<SongSection> sections_;
         std::function<void(std::vector<SongSection>)> onConfirm_;
+        int selectedRow_ = -1;
+        juce::Rectangle<int> listFrameBounds_;
 
-        juce::Label nameLabel_{{}, "Section Name"};
-        juce::TextEditor nameEditor_;
-        juce::Label barsLabel_{{}, "Length (Bars)"};
-        juce::TextEditor barsEditor_;
-        juce::TextButton addSectionButton_{"Add"};
+        juce::Label colNumLabel_{{}, "#"};
+        juce::Label colNameLabel_{{}, "Section Name"};
+        juce::Label colBarsLabel_{{}, "Length"};
+
+        SectionListViewport viewport_;
+        std::unique_ptr<RowsContainer> rowsContent_;
+        std::unique_ptr<DropdownOverlay> dropdownOverlay_;
+
         juce::Label errorLabel_;
-
-        juce::ListBox listBox_;
         juce::TextButton moveUpButton_{"Move Up"};
         juce::TextButton moveDownButton_{"Move Down"};
         juce::TextButton removeButton_{"Remove"};
@@ -796,22 +1184,111 @@ void LibraryView::handleAddSections() {
         juce::TextButton cancelButton_{"Cancel"};
         juce::TextButton doneButton_{"Done"};
 
+        bool isDropdownVisible() const {
+            return dropdownOverlay_ && dropdownOverlay_->isVisible();
+        }
+
+        void hideDropdown() {
+            if (dropdownOverlay_) {
+                dropdownOverlay_->setVisible(false);
+            }
+        }
+
+        void moveDropdownHighlight(int delta) {
+            if (dropdownOverlay_) dropdownOverlay_->moveHighlight(delta);
+        }
+
+        std::string getDropdownHighlightedItem() const {
+            return dropdownOverlay_ ? dropdownOverlay_->getHighlightedItem() : std::string{};
+        }
+
+        void openDropdownForCurrentText(bool showAllIfExactMatch) {
+            if (!rowsContent_ || !dropdownOverlay_) return;
+            std::string raw = rowsContent_->getFilterText();
+            std::string exact = findCanonicalSectionName(raw);
+            if (showAllIfExactMatch && !exact.empty()) {
+                dropdownOverlay_->setItems(getAvailableSections(), exact);
+            } else {
+                dropdownOverlay_->setItems(filterAvailableSections(raw), exact);
+            }
+            positionDropdown();
+            dropdownOverlay_->setVisible(true);
+            dropdownOverlay_->toFront(false);
+        }
+
+        void onFilterTextChanged() {
+            if (!rowsContent_ || !dropdownOverlay_) return;
+            errorLabel_.setText("", juce::dontSendNotification);
+            std::string raw = rowsContent_->getFilterText();
+            dropdownOverlay_->setItems(filterAvailableSections(raw), findCanonicalSectionName(raw));
+            positionDropdown();
+            dropdownOverlay_->setVisible(true);
+            dropdownOverlay_->toFront(false);
+        }
+
+        void commitDropdownSelection(const std::string& canonicalName) {
+            if (!rowsContent_) return;
+            rowsContent_->setFilterText(canonicalName);
+            errorLabel_.setText("", juce::dontSendNotification);
+            hideDropdown();
+            rowsContent_->focusBarsEditorAndSelectAll();
+        }
+
+        void positionDropdown() {
+            if (!rowsContent_ || !dropdownOverlay_) return;
+            auto anchorInRows = rowsContent_->getDropdownAnchorBounds();
+            auto anchorInDialog = getLocalArea(rowsContent_.get(), anchorInRows);
+            const int desiredH = dropdownOverlay_->getDesiredHeight();
+            const int spaceBelow = getHeight() - anchorInDialog.getBottom() - 8;
+            const int spaceAbove = anchorInDialog.getY() - 8;
+
+            int y = anchorInDialog.getBottom() + 2;
+            int h = desiredH;
+            if (spaceBelow < desiredH && spaceAbove > spaceBelow) {
+                h = std::min(desiredH, std::max(60, spaceAbove - 2));
+                y = anchorInDialog.getY() - h - 2;
+            } else {
+                h = std::min(desiredH, std::max(60, spaceBelow));
+            }
+            dropdownOverlay_->setBounds(anchorInDialog.getX(), y, anchorInDialog.getWidth(), h);
+        }
+
+        void refreshRowsLayout(bool scrollToBottom) {
+            if (!rowsContent_) return;
+            const int totalRows = static_cast<int>(sections_.size()) + 1; // Committed sections + inline next row
+            const int neededH = std::max(viewport_.getHeight(), totalRows * kRowHeight);
+            const int scrollBarW = (totalRows * kRowHeight > viewport_.getHeight()) ? viewport_.getScrollBarThickness() : 0;
+            const int contentW = std::max(100, viewport_.getWidth() - scrollBarW);
+            rowsContent_->setSize(contentW, neededH);
+            rowsContent_->layoutInlineRow();
+            rowsContent_->repaint();
+
+            if (scrollToBottom) {
+                int maxScrollY = std::max(0, totalRows * kRowHeight - viewport_.getHeight());
+                viewport_.setViewPosition(0, maxScrollY);
+            }
+        }
+
         void addSectionFromInputs() {
-            auto secName = nameEditor_.getText().trim().toStdString();
-            int bars = barsEditor_.getText().trim().getIntValue();
+            if (!rowsContent_) return;
+            std::string rawName = rowsContent_->getFilterText();
+            std::string secName = findCanonicalSectionName(rawName);
+            int bars = rowsContent_->getBarsValue();
 
             if (secName.empty()) {
-                errorLabel_.setText("Enter a section name (e.g. Intro, Verse 1, Chorus).", juce::dontSendNotification);
-                nameEditor_.grabKeyboardFocus();
+                errorLabel_.setText("Select a valid section from the filtered list.", juce::dontSendNotification);
+                openDropdownForCurrentText(false);
+                rowsContent_->focusFilterEditor();
                 return;
             }
             if (bars <= 0) {
                 errorLabel_.setText("Enter a section length of at least 1 bar.", juce::dontSendNotification);
-                barsEditor_.grabKeyboardFocus();
+                rowsContent_->focusBarsEditorAndSelectAll();
                 return;
             }
 
             errorLabel_.setText("", juce::dontSendNotification);
+            hideDropdown();
 
             SongSection sec;
             sec.name = secName;
@@ -819,12 +1296,11 @@ void LibraryView::handleAddSections() {
             sec.orderIndex = static_cast<int>(sections_.size());
             sections_.push_back(std::move(sec));
 
-            listBox_.updateContent();
-            listBox_.selectRow(static_cast<int>(sections_.size()) - 1);
+            selectedRow_ = static_cast<int>(sections_.size()) - 1;
+            rowsContent_->setFilterText("");
+            refreshRowsLayout(true);
             updateSummary();
-
-            nameEditor_.setText("", false);
-            nameEditor_.grabKeyboardFocus();
+            rowsContent_->focusFilterEditor();
         }
 
         void reindexSections() {
@@ -1154,16 +1630,20 @@ void LibraryView::resized() {
     notesLabel_.setBounds(row4.removeFromLeft(100));
     notesEditor_.setBounds(row4);
 
-    rightCol.removeFromTop(16);
-    auto attachRow = rightCol.removeFromTop(28);
-    attachmentHeader_.setBounds(attachRow.removeFromLeft(110));
-    arrangementPicker_.setBounds(attachRow.removeFromLeft(220));
-    attachRow.removeFromLeft(8);
-    attachFolderButton_.setBounds(attachRow.removeFromLeft(126));
-    attachRow.removeFromLeft(6);
-    addSectionsButton_.setBounds(attachRow.removeFromLeft(108));
-    attachRow.removeFromLeft(6);
-    removeArrangementButton_.setBounds(attachRow.removeFromLeft(74));
+    rightCol.removeFromTop(14);
+    auto attachRow1 = rightCol.removeFromTop(28);
+    attachmentHeader_.setBounds(attachRow1.removeFromLeft(110));
+    arrangementPicker_.setBounds(attachRow1);
+
+    rightCol.removeFromTop(6);
+    auto attachRow2 = rightCol.removeFromTop(28);
+    attachFolderButton_.setBounds(attachRow2.removeFromLeft(132));
+    attachRow2.removeFromLeft(6);
+    editArrangementButton_.setBounds(attachRow2.removeFromLeft(132));
+    attachRow2.removeFromLeft(6);
+    addSectionsButton_.setBounds(attachRow2.removeFromLeft(118));
+    attachRow2.removeFromLeft(6);
+    removeArrangementButton_.setBounds(attachRow2.removeFromLeft(80));
 
     rightCol.removeFromTop(4);
     attachmentStatusLabel_.setBounds(rightCol.removeFromTop(20));

@@ -5,6 +5,9 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "../Models/Song.h"
 #include "Metronome.h"
+#include "PitchShiftUtils.h"
+#include "SectionJumpUtils.h"
+#include <signalsmith-stretch.h>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -74,10 +77,19 @@ public:
 
     void setTempo(int tempo);
     void setTimeSignature(const std::string& timeSignature);
+    void setPitchSemitones(int semitones);
+    int getPitchSemitones() const { return pitchSemitones_.load(std::memory_order_relaxed); }
 
     void setUseTracks(bool enabled);
     bool getUseTracks() const { return useTracks_.load(std::memory_order_relaxed); }
     bool hasLoadedTracks() const { return hasTracks_.load(std::memory_order_relaxed); }
+
+    // Queued section navigation (executes seamlessly when the current section finishes)
+    void skipSection(int delta);
+    void toggleRepeatCurrentSection();
+    void clearQueuedSection();
+    int getQueuedSectionIndex() const { return queuedSectionIndexAtomic_.load(std::memory_order_relaxed); }
+    int getSectionCount() const { return sectionCountAtomic_.load(std::memory_order_relaxed); }
 
     // Waveform & timeline query
     uint64_t getWaveformVersion() const { return waveformVersion_.load(std::memory_order_relaxed); }
@@ -114,6 +126,10 @@ private:
         float smoothedCorrelation = 0.0f;
         float monoGainL = 0.70710678f;
         float monoGainR = 0.70710678f;
+        bool pitchShiftExcluded = false;
+        std::shared_ptr<signalsmith::stretch::SignalsmithStretch<float>> pitchShifter;
+        int64_t pitchShifterInputPos = 0;
+        bool pitchShifterPrimed = false;
     };
 
     struct CachedSongAudio {
@@ -140,8 +156,17 @@ private:
     std::atomic<bool> hasTracks_{false};
     std::atomic<bool> hasLeadingCountSection_{false};
     std::atomic<int> sectionTotalBars_{0};
+    std::atomic<int> sectionCountAtomic_{0};
+    std::atomic<int> queuedSectionIndexAtomic_{-1};
     std::atomic<int64_t> maxSongLengthFramesAtomic_{0};
     std::atomic<float> masterGain_{1.0f};
+    std::atomic<int> pitchSemitones_{0};
+
+    std::vector<SectionSpan> sectionSpans_;
+    int queuedSectionIndex_ = -1;
+    int queuedJumpBoundaryBar_ = -1;
+    int trackJumpFadeSamplesRemaining_ = 0;
+    static constexpr int kTrackJumpFadeSamples = 64;
 
     std::atomic<int> currentOutputChannels_{2};
     double currentSampleRate_ = 44100.0;
@@ -165,6 +190,19 @@ private:
     std::thread loaderThread_;
 
     juce::AudioBuffer<float> renderScratchBuffer_;
+    juce::AudioBuffer<float> pitchInScratch_;
+    juce::AudioBuffer<float> pitchOutScratch_;
+    juce::AudioBuffer<float> pitchPrimeInScratch_;
+    juce::AudioBuffer<float> pitchPrimeOutScratch_;
+
+    void preparePitchShiftersLocked();
+    void rebuildSectionSpansLocked(const std::vector<SongSection>& sections);
+    void clearQueuedSectionLocked();
+    void renderSegmentLocked(int scratchOffset,
+                             int segmentSamples,
+                             int numOutputChannels,
+                             bool playTracks,
+                             int64_t audioStartFrame);
 
     void loadEmbeddedAssets();
     void loadEmbeddedClicksLocked();

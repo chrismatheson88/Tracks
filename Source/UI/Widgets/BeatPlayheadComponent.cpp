@@ -30,7 +30,8 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
                                            double trackDurationBars,
                                            int trackBarCount,
                                            bool isLoadingTracks,
-                                           bool hasLeadingCountSection) {
+                                           bool hasLeadingCountSection,
+                                           int queuedSectionIndex) {
     totalBarsElapsed_ = std::max(0.0, totalBarsElapsed);
     currentBeatInBar_ = currentBeatInBar;
     currentBar_ = currentBar;
@@ -41,6 +42,7 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
     showTracksWaveform_ = showTracksWaveform;
     isLoadingTracks_ = isLoadingTracks;
     hasLeadingCountSection_ = hasLeadingCountSection;
+    queuedSectionIndex_ = queuedSectionIndex;
     trackDurationBars_ = std::max(0.0, trackDurationBars);
     trackBarCount_ = std::max(0, trackBarCount);
     repaint();
@@ -117,6 +119,10 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
     }
 
     const bool activeIsCount = inPrependedCountIn || inCountSection;
+    const bool hasValidQueuedSec = waveformMode && hasActivePosition &&
+                                   queuedSectionIndex_ >= 0 &&
+                                   queuedSectionIndex_ < static_cast<int>(sections_.size());
+    const juce::Colour queuedAccent(0xff38bdf8); // Bright cyan-blue for queued section jump
 
     // Status header
     juce::String statusText;
@@ -159,9 +165,33 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
 
     const float statusH = isExpanded ? 15.0f : 12.0f;
     g.setFont(juce::Font(isExpanded ? 11.5f : 9.5f, juce::Font::bold));
-    g.setColour(statusCol);
-    g.drawText(statusText, contentX, contentY, contentW, statusH,
-               isExpanded ? juce::Justification::centredLeft : juce::Justification::centred);
+    if (hasValidQueuedSec && !isExpanded) {
+        const auto& qSec = sections_[static_cast<size_t>(queuedSectionIndex_)];
+        g.setColour(queuedAccent);
+        g.drawText("NEXT: " + juce::String(qSec.name).toUpperCase(),
+                   contentX, contentY, contentW, statusH, juce::Justification::centred, true);
+    } else {
+        g.setColour(statusCol);
+        g.drawText(statusText, contentX, contentY, contentW, statusH,
+                   isExpanded ? juce::Justification::centredLeft : juce::Justification::centred, true);
+
+        if (hasValidQueuedSec && isExpanded) {
+            const auto& qSec = sections_[static_cast<size_t>(queuedSectionIndex_)];
+            const bool isRepeat = (queuedSectionIndex_ == activeSectionIdx);
+            juce::String badgeText = (isRepeat ? "REPEAT: " : "NEXT: ") + juce::String(qSec.name).toUpperCase();
+            juce::Font badgeFont(10.5f, juce::Font::bold);
+            g.setFont(badgeFont);
+            const float textW = badgeFont.getStringWidthFloat(badgeText);
+            const float badgeW = std::min(contentW * 0.45f, textW + 14.0f);
+            juce::Rectangle<float> badgeRect(contentX + contentW - badgeW, contentY - 1.0f, badgeW, statusH + 2.0f);
+            g.setColour(queuedAccent.withAlpha(0.18f));
+            g.fillRoundedRectangle(badgeRect, 3.5f);
+            g.setColour(queuedAccent.withAlpha(0.85f));
+            g.drawRoundedRectangle(badgeRect, 3.5f, 1.0f);
+            g.setColour(queuedAccent.brighter(0.25f));
+            g.drawText(badgeText, badgeRect.reduced(5.0f, 0.0f), juce::Justification::centred, true);
+        }
+    }
 
     const float trackY = contentY + statusH + (isExpanded ? 16.0f : 5.0f);
     const float trackH = std::max(14.0f, contentY + contentH - trackY);
@@ -276,12 +306,15 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 float secW = static_cast<float>(std::min(len, trackBarCount_ - startBarZeroIdx)) * trackBarPx;
                 const bool isCount = sec.isCountSection();
                 const bool isActiveSec = (static_cast<int>(i) == activeSectionIdx);
+                const bool isQueuedSec = hasValidQueuedSec && (static_cast<int>(i) == queuedSectionIndex_);
 
                 juce::Colour bgTint;
                 if (isCount) {
                     bgTint = AppTheme::warningAmber.withAlpha(isActiveSec ? 0.22f : 0.10f);
                 } else if (isActiveSec) {
                     bgTint = AppTheme::accentGreen.withAlpha(0.14f);
+                } else if (isQueuedSec) {
+                    bgTint = queuedAccent.withAlpha(0.18f);
                 } else {
                     bgTint = (i % 2 == 0) ? AppTheme::primaryBlue.withAlpha(0.08f)
                                           : AppTheme::bgPanel.withAlpha(0.35f);
@@ -290,10 +323,12 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 g.fillRect(secX, trackY, secW, trackH);
 
                 if (sectionHeaderH > 0.0f) {
-                    juce::Colour hdrBg = isCount
-                                             ? AppTheme::warningAmber.withAlpha(isActiveSec ? 0.35f : 0.18f)
-                                             : (isActiveSec ? AppTheme::accentGreen.withAlpha(0.28f)
-                                                            : AppTheme::bgPanel.brighter(i % 2 == 0 ? 0.08f : 0.02f));
+                    juce::Colour hdrBg = isQueuedSec
+                                             ? queuedAccent.withAlpha(0.34f)
+                                             : (isCount
+                                                    ? AppTheme::warningAmber.withAlpha(isActiveSec ? 0.35f : 0.18f)
+                                                    : (isActiveSec ? AppTheme::accentGreen.withAlpha(0.28f)
+                                                                   : AppTheme::bgPanel.brighter(i % 2 == 0 ? 0.08f : 0.02f)));
                     g.setColour(hdrBg);
                     g.fillRect(secX, trackY, secW, sectionHeaderH);
                 }
@@ -382,6 +417,7 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 float secW = static_cast<float>(std::min(len, trackBarCount_ - startBarZeroIdx)) * trackBarPx;
                 const bool isCount = sec.isCountSection();
                 const bool isActiveSec = (static_cast<int>(i) == activeSectionIdx);
+                const bool isQueuedSec = hasValidQueuedSec && (static_cast<int>(i) == queuedSectionIndex_);
 
                 if (startBarZeroIdx > 0) {
                     g.setColour(isCount ? AppTheme::warningAmber.withAlpha(0.9f)
@@ -389,12 +425,21 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                     g.fillRect(secX - 0.75f, trackY + 1.0f, 1.5f, trackH - 2.0f);
                 }
 
+                if (isQueuedSec) {
+                    g.setColour(queuedAccent.withAlpha(0.95f));
+                    g.drawRect(secX + 0.5f, trackY + 0.5f, std::max(1.0f, secW - 1.0f), trackH - 1.0f, 2.0f);
+                }
+
                 if (sectionHeaderH > 0.0f && secW >= 16.0f) {
                     g.setFont(juce::Font(9.5f, juce::Font::bold));
-                    g.setColour(isActiveSec
-                                    ? AppTheme::textLight
-                                    : (isCount ? AppTheme::warningAmber : AppTheme::textLight.withAlpha(0.85f)));
-                    g.drawText(sec.name, secX + 3.0f, trackY, secW - 6.0f, sectionHeaderH,
+                    g.setColour(isQueuedSec
+                                    ? juce::Colours::white
+                                    : (isActiveSec
+                                           ? AppTheme::textLight
+                                           : (isCount ? AppTheme::warningAmber : AppTheme::textLight.withAlpha(0.85f))));
+                    juce::String label = isQueuedSec ? (juce::String::fromUTF8("\xC2\xBB ") + juce::String(sec.name))
+                                                     : juce::String(sec.name);
+                    g.drawText(label, secX + 3.0f, trackY, secW - 6.0f, sectionHeaderH,
                                juce::Justification::centredLeft, true);
                 }
 
