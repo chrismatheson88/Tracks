@@ -9,12 +9,14 @@
 
 namespace tracks {
 
-class LibraryView : public juce::Component, public juce::ListBoxModel {
+class LibraryView : public juce::Component, public juce::ListBoxModel, private juce::Timer {
 public:
     LibraryView(DatabaseService& db, AudioEngine& audioEngine);
-    ~LibraryView() override = default;
+    ~LibraryView() override;
 
     void refreshSongList();
+    void reloadAfterImport();
+    void flushPendingAutoSave();
     void selectSong(int64_t songId);
 
     std::function<void(const Song&)> onSongLoadedForPlayback;
@@ -31,21 +33,26 @@ private:
     DatabaseService& db_;
     AudioEngine& audioEngine_;
 
+    std::vector<Song> allSongs_;
     std::vector<Song> songs_;
     std::optional<Song> currentSong_;
     std::vector<SongArrangement> pendingArrangements_;
     std::vector<int64_t> removedArrangementIds_;
     int selectedArrangementIndex_ = -1;
-    bool isDirty_ = false;
+    bool hasPendingAutoSave_ = false;
+    bool isLoadingToEditor_ = false;
     bool tracksModified_ = false;
 
-    // Left panel: Song list
+    // Left panel: Song search + list
+    juce::TextEditor searchEditor_;
+    juce::TextButton searchClearButton_{"x"};
     juce::ListBox songListBox_;
     juce::TextButton newSongButton_{"New Song"};
     juce::TextButton deleteSongButton_{"Delete Song"};
 
     // Right panel: Editor
     juce::Label headerLabel_{{}, "Edit Song"};
+    juce::Label autoSaveStatusLabel_;
 
     juce::Label titleLabel_{{}, "Title:"};
     juce::TextEditor titleEditor_;
@@ -70,30 +77,30 @@ private:
     juce::ComboBox arrangementPicker_;
     juce::TextButton attachFolderButton_{"Add Arrangement"};
     juce::TextButton editArrangementButton_{"Edit Arrangement"};
-    juce::TextButton addSectionsButton_{"Track Sections"};
     juce::TextButton removeArrangementButton_{"Remove"};
     juce::Label attachmentStatusLabel_;
+    juce::TextEditor attachmentWarningBox_;
 
     // Tracks viewport / component
     juce::Viewport tracksViewport_;
     std::unique_ptr<juce::Component> tracksContainer_;
 
-    juce::TextButton saveButton_{"Save"};
-    juce::TextButton cancelButton_{"Cancel"};
-
     std::unique_ptr<juce::FileChooser> fileChooser_;
 
+    void timerCallback() override;
+    void applySongFilter(bool allowAutoSelectFirst);
     void loadSongToEditor(const Song& song);
     void clearEditor();
-    void markDirty(bool dirty);
+    void scheduleAutoSave();
+    void setAutoSaveStatus(const juce::String& text, juce::Colour colour);
     void refreshArrangementPicker();
     void updateAttachmentStatusAndButtons();
+    void setAttachmentWarning(const juce::String& warningText);
     void rebuildTrackWidgets();
-    void saveCurrentSong();
+    void saveCurrentSong(bool refreshTrackPanel = false, bool forceFallbackForEmptyFields = false);
     void openArrangementDialog(std::optional<int> editIndex);
     void handleChooseFolder();
     void handleEditArrangement();
-    void handleAddSections();
     void handleRemoveArrangement();
 };
 

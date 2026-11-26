@@ -51,6 +51,7 @@ public:
 
     void setPlayingState(bool isPlaying, bool isPaused);
     void setSongNavigationState(bool canGoPrev, bool canGoNext);
+    void setTransitionConfig(SongTransitionMode mode, int crossfadeBars);
 
     // Callbacks
     std::function<void()> onPlayClicked;
@@ -58,6 +59,7 @@ public:
     std::function<void()> onStopClicked;
     std::function<void()> onPreviousSongClicked;
     std::function<void()> onNextSongClicked;
+    std::function<void(SongTransitionMode, int)> onTransitionChanged;
     std::function<void(float)> onMasterGainChanged;
     std::function<void(float)> onClickGainChanged;
     std::function<void(float)> onGuideGainChanged;
@@ -75,6 +77,7 @@ private:
     AudioEngine& audioEngine_;
 
     class TransportIconButton;
+    class CrossfadeBarsStepper;
     std::unique_ptr<TransportIconButton> prevSongButton_;
     std::unique_ptr<TransportIconButton> skipBackButton_;
     std::unique_ptr<TransportIconButton> playPauseButton_;
@@ -82,11 +85,17 @@ private:
     std::unique_ptr<TransportIconButton> repeatSectionButton_;
     std::unique_ptr<TransportIconButton> skipForwardButton_;
     std::unique_ptr<TransportIconButton> nextSongButton_;
+    juce::ComboBox transitionBox_;
+    std::unique_ptr<CrossfadeBarsStepper> crossfadeBarsStepper_;
+    juce::Label crossfadeBarsLabel_{{}, "bar"};
+    int currentCrossfadeBars_ = 1;
 
     juce::Label songTitleLabel_;
     juce::Label songArtistLabel_;
 
+    juce::TextButton tempoDownButton_{"-"};
     juce::TextEditor tempoEditor_;
+    juce::TextButton tempoUpButton_{"+"};
     juce::Label bpmSuffixLabel_{{}, "BPM"};
     juce::Label keyPrefixLabel_{{}, "Key:"};
     juce::ComboBox keyBox_;
@@ -100,6 +109,7 @@ private:
     std::string currentTimeSig_ = "4/4";
     std::vector<SongArrangement> currentArrangements_;
     std::optional<int64_t> activeArrangementId_;
+    int arrangementTargetTempo_ = 0;
     std::string arrangementTargetKey_;
     int clickOnlyTempo_ = 120;
     std::string clickOnlyKey_ = "C";
@@ -155,6 +165,10 @@ private:
     void populateKeyBoxOptions(bool filterByTrackKey, const std::string& trackSourceKey);
     void updateSongParamEditorsEnabled();
     void applyCurrentKeyPitchShift();
+    int getActiveOriginalTrackTempo() const;
+    std::pair<int, int> getCurrentAllowedTempoRange() const;
+    void updateTempoControlsUi();
+    void nudgeTempo(int delta);
     void commitTempoEditor(bool clampAndFormat);
     void updateSubdivisionFaderVisibility();
     void layoutTrackStrips(int viewportWidth, int viewportHeight);

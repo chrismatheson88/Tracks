@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 project(Tracks VERSION 1.0.0 LANGUAGES C CXX OBJCXX)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -66,8 +70,12 @@ target_sources(Tracks PRIVATE
     Source/Audio/Metronome.cpp
     Source/Audio/PitchShiftUtils.h
     Source/Audio/SectionJumpUtils.h
+    Source/Audio/TempoMap.h
+    Source/Audio/MidiTempoImporter.h
     Source/Services/AudioAttachmentService.h
     Source/Services/AudioAttachmentService.cpp
+    Source/Services/LibraryBackupService.h
+    Source/Services/LibraryBackupService.cpp
     Source/UI/Widgets/BeatPlayheadComponent.h
     Source/UI/Widgets/BeatPlayheadComponent.cpp
     Source/UI/Widgets/CalendarPopupComponent.h
@@ -90,6 +98,14 @@ target_include_directories(Tracks PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty"
     "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/signalsmith-stretch"
 )
+
+if(NOT MSVC)
+    set_source_files_properties(
+        Source/Audio/AudioEngine.cpp
+        Source/Audio/Metronome.cpp
+        PROPERTIES COMPILE_OPTIONS "-O3"
+    )
+endif()
 
 target_link_libraries(Tracks
     PRIVATE
@@ -120,15 +136,25 @@ target_link_libraries(DatabaseTests PRIVATE SQLite3::SQLite3)
 add_executable(AudioEngineTests
     Source/Tests/AudioEngineTests.cpp
     Source/Audio/Metronome.cpp
+    Source/Database/DatabaseService.cpp
     Source/Services/AudioAttachmentService.cpp
+    Source/Services/LibraryBackupService.cpp
 )
 target_include_directories(AudioEngineTests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty"
     "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/signalsmith-stretch"
 )
+if(NOT MSVC)
+    set_source_files_properties(
+        Source/Tests/AudioEngineTests.cpp
+        Source/Audio/Metronome.cpp
+        PROPERTIES COMPILE_OPTIONS "-O3"
+    )
+endif()
 
 target_link_libraries(AudioEngineTests
     PRIVATE
+        SQLite3::SQLite3
         juce::juce_core
         juce::juce_events
         juce::juce_graphics

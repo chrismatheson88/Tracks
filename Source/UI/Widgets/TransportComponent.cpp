@@ -136,6 +136,7 @@ public:
         fader_.setSliderStyle(juce::Slider::LinearVertical);
         fader_.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 54, 18);
         fader_.setTextValueSuffix(" dB");
+        fader_.setScrollWheelEnabled(false);
         fader_.setColour(juce::Slider::textBoxTextColourId, AppTheme::textMuted);
         fader_.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
         fader_.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
@@ -171,9 +172,9 @@ public:
     void resized() override {
         auto inner = getLocalBounds().reduced(4, 8);
         nameLabel_.setBounds(inner.removeFromTop(18));
-        inner.removeFromTop(4);
-        channelBox_.setBounds(inner.removeFromTop(22));
         inner.removeFromTop(6);
+        channelBox_.setBounds(inner.removeFromBottom(22));
+        inner.removeFromBottom(6);
         fader_.setBounds(inner);
     }
 
@@ -367,6 +368,135 @@ private:
     bool activeHighlight_ = false;
 };
 
+class TransportComponent::CrossfadeBarsStepper : public juce::Component,
+                                                 public juce::SettableTooltipClient {
+public:
+    std::function<void(int)> onValueChanged;
+
+    CrossfadeBarsStepper() {
+        setRepaintsOnMouseActivity(true);
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+    }
+
+    void setValue(int v) {
+        int clamped = clampCrossfadeBars(v);
+        if (value_ != clamped) {
+            value_ = clamped;
+            repaint();
+        }
+    }
+
+    int getValue() const { return value_; }
+
+    void paint(juce::Graphics& g) override {
+        auto bounds = getLocalBounds().toFloat().reduced(0.5f);
+        g.setColour(AppTheme::bgInput);
+        g.fillRoundedRectangle(bounds, 4.0f);
+
+        const float arrowColW = 16.0f;
+        const float splitX = bounds.getRight() - arrowColW;
+        const float midY = bounds.getCentreY();
+
+        // Arrow half hover / press fills
+        juce::Rectangle<float> upRect(splitX, bounds.getY(), arrowColW, midY - bounds.getY());
+        juce::Rectangle<float> downRect(splitX, midY, arrowColW, bounds.getBottom() - midY);
+
+        if (hoverZone_ == 1 && value_ < 4) {
+            g.setColour((pressedZone_ == 1 ? AppTheme::primaryBlue : AppTheme::bgPanel.brighter(0.22f)).withAlpha(0.85f));
+            g.fillRect(upRect.reduced(0.5f));
+        } else if (hoverZone_ == -1 && value_ > 1) {
+            g.setColour((pressedZone_ == -1 ? AppTheme::primaryBlue : AppTheme::bgPanel.brighter(0.22f)).withAlpha(0.85f));
+            g.fillRect(downRect.reduced(0.5f));
+        }
+
+        // Dividers & outer border
+        g.setColour(AppTheme::borderCol);
+        g.drawVerticalLine(static_cast<int>(std::round(splitX)), bounds.getY(), bounds.getBottom());
+        g.drawHorizontalLine(static_cast<int>(std::round(midY)), splitX, bounds.getRight());
+        g.drawRoundedRectangle(bounds, 4.0f, 1.0f);
+
+        // Numeric value
+        juce::Rectangle<float> valRect(bounds.getX(), bounds.getY(), splitX - bounds.getX(), bounds.getHeight());
+        g.setFont(juce::Font(12.0f, juce::Font::bold));
+        g.setColour(AppTheme::textLight);
+        g.drawText(juce::String(value_), valRect, juce::Justification::centred, false);
+
+        // Tiny crisp up/down triangles
+        const float triW = 3.2f;
+        const float triH = 2.4f;
+        {
+            const float cx = upRect.getCentreX();
+            const float cy = upRect.getCentreY() + 0.5f;
+            juce::Path upTri;
+            upTri.addTriangle(cx, cy - triH, cx - triW, cy + triH * 0.8f, cx + triW, cy + triH * 0.8f);
+            g.setColour(value_ < 4 ? AppTheme::textLight : AppTheme::textMuted.withAlpha(0.32f));
+            g.fillPath(upTri);
+        }
+        {
+            const float cx = downRect.getCentreX();
+            const float cy = downRect.getCentreY() - 0.5f;
+            juce::Path downTri;
+            downTri.addTriangle(cx, cy + triH, cx - triW, cy - triH * 0.8f, cx + triW, cy - triH * 0.8f);
+            g.setColour(value_ > 1 ? AppTheme::textLight : AppTheme::textMuted.withAlpha(0.32f));
+            g.fillPath(downTri);
+        }
+    }
+
+    void mouseMove(const juce::MouseEvent& e) override {
+        updateHoverZone(e.position);
+    }
+
+    void mouseExit(const juce::MouseEvent&) override {
+        hoverZone_ = 0;
+        pressedZone_ = 0;
+        repaint();
+    }
+
+    void mouseDown(const juce::MouseEvent& e) override {
+        updateHoverZone(e.position);
+        const int zone = (e.position.y < getHeight() * 0.5f) ? 1 : -1;
+        pressedZone_ = zone;
+        stepBy(zone);
+        repaint();
+    }
+
+    void mouseUp(const juce::MouseEvent&) override {
+        pressedZone_ = 0;
+        repaint();
+    }
+
+    void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override {
+        if (wheel.deltaY > 0.0f) stepBy(1);
+        else if (wheel.deltaY < 0.0f) stepBy(-1);
+    }
+
+private:
+    int value_ = 1;
+    int hoverZone_ = 0;   // +1 = up, -1 = down, 0 = none
+    int pressedZone_ = 0;
+
+    void updateHoverZone(juce::Point<float> pos) {
+        const float splitX = static_cast<float>(getWidth()) - 16.5f;
+        int nextZone = 0;
+        if (pos.x >= splitX) {
+            nextZone = (pos.y < static_cast<float>(getHeight()) * 0.5f) ? 1 : -1;
+        }
+        if (nextZone != hoverZone_) {
+            hoverZone_ = nextZone;
+            repaint();
+        }
+    }
+
+    void stepBy(int delta) {
+        int next = clampCrossfadeBars(value_ + delta);
+        if (next != value_) {
+            value_ = next;
+            repaint();
+            if (onValueChanged) onValueChanged(value_);
+        }
+    }
+};
+
 TransportComponent::TransportComponent(AudioEngine& audioEngine)
     : audioEngine_(audioEngine) {
     setOpaque(true);
@@ -407,11 +537,15 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     };
     addAndMakeVisible(stopButton_.get());
 
-    // Repeat current section button (plays to end of current section, restarts once, then resets; click again to cancel)
-    repeatSectionButton_ = std::make_unique<TransportIconButton>("Repeat Current Section", TransportIconButton::IconType::Repeat, AppTheme::bgPanel);
+    // Repeat current section button (with tracks) / Click Loop toggle (without tracks)
+    repeatSectionButton_ = std::make_unique<TransportIconButton>("Repeat / Loop", TransportIconButton::IconType::Repeat, AppTheme::bgPanel);
     repeatSectionButton_->setEnabled(false);
     repeatSectionButton_->onClick = [this]() {
-        audioEngine_.toggleRepeatCurrentSection();
+        if (audioEngine_.isStructuredTimelineMode()) {
+            audioEngine_.toggleRepeatCurrentSection();
+        } else {
+            audioEngine_.toggleClickLoop();
+        }
     };
     addAndMakeVisible(repeatSectionButton_.get());
 
@@ -431,6 +565,43 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     };
     addChildComponent(nextSongButton_.get());
 
+    // Song end transition dropdown (shown to the right of play controls in ExpandedPanel / Open Set view)
+    transitionBox_.addItem("Stay in current song", 1);
+    transitionBox_.addItem("Cue next song", 2);
+    transitionBox_.addItem("Autoplay next song", 3);
+    transitionBox_.addItem("Crossfade", 4);
+    transitionBox_.setSelectedId(1, juce::dontSendNotification);
+    transitionBox_.setTooltip("Song end transition");
+    transitionBox_.onChange = [this]() {
+        int id = transitionBox_.getSelectedId();
+        if (id >= 1 && id <= 4) {
+            auto mode = clampTransitionMode(id - 1);
+            resized();
+            repaint();
+            if (onTransitionChanged) {
+                onTransitionChanged(mode, currentCrossfadeBars_);
+            }
+        }
+    };
+    addChildComponent(transitionBox_);
+
+    crossfadeBarsStepper_ = std::make_unique<CrossfadeBarsStepper>();
+    crossfadeBarsStepper_->setValue(1);
+    crossfadeBarsStepper_->setTooltip("Bars to crossfade (1-4)");
+    crossfadeBarsStepper_->onValueChanged = [this](int bars) {
+        currentCrossfadeBars_ = clampCrossfadeBars(bars);
+        crossfadeBarsLabel_.setText(currentCrossfadeBars_ == 1 ? "bar" : "bars", juce::dontSendNotification);
+        if (onTransitionChanged && transitionBox_.getSelectedId() == 4) {
+            onTransitionChanged(SongTransitionMode::Crossfade, currentCrossfadeBars_);
+        }
+    };
+    addChildComponent(crossfadeBarsStepper_.get());
+
+    crossfadeBarsLabel_.setFont(juce::Font(11.0f, juce::Font::bold));
+    crossfadeBarsLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+    crossfadeBarsLabel_.setJustificationType(juce::Justification::centredLeft);
+    addChildComponent(crossfadeBarsLabel_);
+
     // Song info labels
     songTitleLabel_.setFont(juce::Font(15.0f, juce::Font::bold));
     songTitleLabel_.setColour(juce::Label::textColourId, AppTheme::textLight);
@@ -443,6 +614,11 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     addAndMakeVisible(songArtistLabel_);
 
     // Editable BPM / Key / Time Signature controls
+    tempoDownButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
+    tempoDownButton_.setTooltip("Decrease tempo by 1 BPM");
+    tempoDownButton_.onClick = [this]() { nudgeTempo(-1); };
+    addChildComponent(tempoDownButton_);
+
     tempoEditor_.setFont(juce::Font(11.5f, juce::Font::bold));
     tempoEditor_.setJustification(juce::Justification::centred);
     tempoEditor_.setInputRestrictions(3, "0123456789");
@@ -454,6 +630,11 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     };
     tempoEditor_.onFocusLost = [this]() { commitTempoEditor(true); };
     addAndMakeVisible(tempoEditor_);
+
+    tempoUpButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
+    tempoUpButton_.setTooltip("Increase tempo by 1 BPM");
+    tempoUpButton_.onClick = [this]() { nudgeTempo(1); };
+    addChildComponent(tempoUpButton_);
 
     bpmSuffixLabel_.setFont(juce::Font(11.0f, juce::Font::bold));
     bpmSuffixLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
@@ -547,6 +728,7 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
         s.setSliderStyle(juce::Slider::LinearHorizontal);
         s.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
         s.setTextValueSuffix(" dB");
+        s.setScrollWheelEnabled(false);
         s.setColour(juce::Slider::textBoxTextColourId, AppTheme::textMuted);
         s.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
         s.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
@@ -639,7 +821,7 @@ void TransportComponent::setSongInfo(const std::string& title,
                                      const std::string& key,
                                      const std::string& timeSignature) {
     songTitleLabel_.setText(title.empty() ? "No Song Selected" : title, juce::dontSendNotification);
-    songArtistLabel_.setText(artist.empty() ? "—" : artist, juce::dontSendNotification);
+    songArtistLabel_.setText(artist.empty() ? "-" : artist, juce::dontSendNotification);
 
     currentTempo_ = std::clamp(tempo > 0 ? tempo : 120, 20, 300);
     currentKey_ = key.empty() ? "C" : key;
@@ -664,25 +846,105 @@ void TransportComponent::setSongInfo(const std::string& title,
     selectOrAddComboItem(timeSigBox_, currentTimeSig_);
 }
 
+int TransportComponent::getActiveOriginalTrackTempo() const {
+    if (!currentArrangements_.empty()) {
+        const SongArrangement* activeArr = nullptr;
+        if (activeArrangementId_.has_value()) {
+            for (const auto& arr : currentArrangements_) {
+                if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
+                    activeArr = &arr;
+                    break;
+                }
+            }
+        }
+        if (!activeArr) activeArr = &currentArrangements_.front();
+        if (activeArr && activeArr->tempo > 0) {
+            return std::clamp(activeArr->tempo, 20, 300);
+        }
+    }
+    return std::clamp(clickOnlyTempo_ > 0 ? clickOnlyTempo_ : 120, 20, 300);
+}
+
+std::pair<int, int> TransportComponent::getCurrentAllowedTempoRange() const {
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    if (usingTracks) {
+        return getAllowedTrackTempoRange(getActiveOriginalTrackTempo());
+    }
+    return { 20, 300 };
+}
+
+void TransportComponent::updateTempoControlsUi() {
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const auto [minBpm, maxBpm] = getCurrentAllowedTempoRange();
+    tempoDownButton_.setEnabled(currentTempo_ > minBpm);
+    tempoUpButton_.setEnabled(currentTempo_ < maxBpm);
+
+    if (usingTracks) {
+        const int origTempo = getActiveOriginalTrackTempo();
+        const int delta = currentTempo_ - origTempo;
+        const double pct = (origTempo > 0) ? (100.0 * static_cast<double>(currentTempo_) / static_cast<double>(origTempo)) : 100.0;
+        juce::String rangeStr = " (allowed: " + juce::String(minBpm) + "-" + juce::String(maxBpm) + " BPM)";
+        if (delta != 0) {
+            juce::String sign = (delta > 0) ? "+" : "";
+            tempoEditor_.setTooltip("Time-stretched " + sign + juce::String(delta) + " BPM (" +
+                                    juce::String(pct, 1) + "%) from " + juce::String(origTempo) + " BPM" + rangeStr);
+        } else {
+            tempoEditor_.setTooltip("Original arrangement tempo: " + juce::String(origTempo) + " BPM" + rangeStr);
+        }
+        tempoDownButton_.setTooltip("Decrease tempo by 1 BPM (min " + juce::String(minBpm) + " BPM)");
+        tempoUpButton_.setTooltip("Increase tempo by 1 BPM (max " + juce::String(maxBpm) + " BPM)");
+    } else {
+        tempoEditor_.setTooltip("Song Tempo (20-300 BPM)");
+        tempoDownButton_.setTooltip("Decrease tempo by 1 BPM");
+        tempoUpButton_.setTooltip("Increase tempo by 1 BPM");
+    }
+}
+
+void TransportComponent::nudgeTempo(int delta) {
+    const auto [minBpm, maxBpm] = getCurrentAllowedTempoRange();
+    int nextTempo = std::clamp(currentTempo_ + delta, minBpm, maxBpm);
+    if (nextTempo == currentTempo_) return;
+
+    currentTempo_ = nextTempo;
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    if (usingTracks) {
+        arrangementTargetTempo_ = currentTempo_;
+    }
+    tempoEditor_.setText(juce::String(currentTempo_), false);
+    audioEngine_.setTempo(currentTempo_);
+    updateTempoControlsUi();
+    notifySongParamsChanged();
+}
+
 void TransportComponent::commitTempoEditor(bool clampAndFormat) {
     auto text = tempoEditor_.getText().trim();
     int parsed = text.getIntValue();
+    const auto [minBpm, maxBpm] = getCurrentAllowedTempoRange();
+    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
 
     if (clampAndFormat) {
         if (text.isEmpty() || parsed <= 0) {
             tempoEditor_.setText(juce::String(currentTempo_), false);
             return;
         }
-        int clamped = std::clamp(parsed, 20, 300);
+        int clamped = std::clamp(parsed, minBpm, maxBpm);
         tempoEditor_.setText(juce::String(clamped), false);
         if (clamped != currentTempo_) {
             currentTempo_ = clamped;
+            if (usingTracks) {
+                arrangementTargetTempo_ = currentTempo_;
+            }
             audioEngine_.setTempo(currentTempo_);
+            updateTempoControlsUi();
             notifySongParamsChanged();
         }
-    } else if (parsed >= 20 && parsed <= 300 && parsed != currentTempo_) {
+    } else if (parsed >= minBpm && parsed <= maxBpm && parsed != currentTempo_) {
         currentTempo_ = parsed;
+        if (usingTracks) {
+            arrangementTargetTempo_ = currentTempo_;
+        }
         audioEngine_.setTempo(currentTempo_);
+        updateTempoControlsUi();
         notifySongParamsChanged();
     }
 }
@@ -701,9 +963,10 @@ void TransportComponent::notifySongParamsChanged() {
 
 void TransportComponent::updateSongParamEditorsEnabled() {
     const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
-    tempoEditor_.setEnabled(!usingTracks);
-    keyBox_.setEnabled(true); // Key can be transposed live via real-time pitch shifting (Drums & FX excluded)
+    tempoEditor_.setEnabled(true); // Tempo can be varied live (limited to +/-10 BPM when tracks are enabled)
+    keyBox_.setEnabled(true);      // Key can be transposed live via real-time pitch shifting (Drums & FX excluded)
     timeSigBox_.setEnabled(!usingTracks);
+    updateTempoControlsUi();
 }
 
 void TransportComponent::applyCurrentKeyPitchShift() {
@@ -777,18 +1040,20 @@ void TransportComponent::applyActiveModeSettings() {
     const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
     updateSongParamEditorsEnabled();
 
-    const SongArrangement* activeArr = nullptr;
-    if (usingTracks && !currentArrangements_.empty()) {
+    const SongArrangement* selectedArr = nullptr;
+    if (!currentArrangements_.empty()) {
         if (activeArrangementId_.has_value()) {
             for (const auto& arr : currentArrangements_) {
                 if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
-                    activeArr = &arr;
+                    selectedArr = &arr;
                     break;
                 }
             }
         }
-        if (!activeArr) activeArr = &currentArrangements_.front();
+        if (!selectedArr) selectedArr = &currentArrangements_.front();
     }
+    const bool isTracklessArrangement = (selectedArr != nullptr && selectedArr->tracks.empty());
+    const SongArrangement* activeArr = (usingTracks || isTracklessArrangement) ? selectedArr : nullptr;
 
     std::string trackSourceKey;
     if (usingTracks) {
@@ -801,7 +1066,25 @@ void TransportComponent::applyActiveModeSettings() {
 
     populateKeyBoxOptions(usingTracks, trackSourceKey);
 
-    int targetTempo = activeArr ? activeArr->tempo : clickOnlyTempo_;
+    int targetTempo = clickOnlyTempo_;
+    if (usingTracks) {
+        const int origTempo = getActiveOriginalTrackTempo();
+        audioEngine_.setOriginalTrackTempo(origTempo);
+        targetTempo = (arrangementTargetTempo_ > 0)
+                          ? clampTrackTempoForUi(arrangementTargetTempo_, origTempo)
+                          : origTempo;
+        arrangementTargetTempo_ = targetTempo;
+    } else if (isTracklessArrangement) {
+        const int origTempo = (activeArr->tempo > 0) ? activeArr->tempo : clickOnlyTempo_;
+        audioEngine_.setOriginalTrackTempo(origTempo);
+        targetTempo = (arrangementTargetTempo_ > 0)
+                          ? std::clamp(arrangementTargetTempo_, 20, 300)
+                          : origTempo;
+        arrangementTargetTempo_ = targetTempo;
+    } else {
+        audioEngine_.setOriginalTrackTempo(clickOnlyTempo_);
+    }
+
     std::string targetKey = activeArr
                                 ? (!arrangementTargetKey_.empty() ? arrangementTargetKey_
                                                                   : (activeArr->key.empty() ? "C" : activeArr->key))
@@ -840,6 +1123,7 @@ void TransportComponent::applyActiveModeSettings() {
     audioEngine_.setTempo(currentTempo_);
     audioEngine_.setTimeSignature(currentTimeSig_);
     applyCurrentKeyPitchShift();
+    updateTempoControlsUi();
 
     eighthsToggle_.setToggleState(target8, juce::dontSendNotification);
     sixteenthsToggle_.setToggleState(target16, juce::dontSendNotification);
@@ -862,7 +1146,8 @@ void TransportComponent::syncArrangements(const std::vector<SongArrangement>& ar
                                           float clickOnlySixteenthsGain) {
     currentArrangements_ = arrangements;
     activeArrangementId_ = activeArrangementId;
-    arrangementTargetKey_ = currentKey_; // Preserves any setlist-overridden transposed key passed via setSongInfo()
+    arrangementTargetTempo_ = currentTempo_; // Preserves any setlist-overridden tempo passed via setSongInfo()
+    arrangementTargetKey_ = currentKey_;     // Preserves any setlist-overridden transposed key passed via setSongInfo()
     clickOnlyTempo_ = (clickOnlyTempo > 0) ? clickOnlyTempo : 120;
     clickOnlyKey_ = clickOnlyKey.empty() ? "C" : clickOnlyKey;
     clickOnlyTimeSig_ = clickOnlyTimeSig.empty() ? "4/4" : clickOnlyTimeSig;
@@ -936,8 +1221,17 @@ void TransportComponent::notifyClickSubdivisionsChanged() {
     const float g16 = sliderDbToLinear(static_cast<float>(sixteenthClickSlider_.getValue()));
 
     const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    bool activeArrIsTrackless = false;
+    if (activeArrangementId_.has_value()) {
+        for (const auto& arr : currentArrangements_) {
+            if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
+                activeArrIsTrackless = arr.tracks.empty();
+                break;
+            }
+        }
+    }
     std::optional<int64_t> targetArrId;
-    if (usingTracks && activeArrangementId_.has_value()) {
+    if ((usingTracks || activeArrIsTrackless) && activeArrangementId_.has_value()) {
         targetArrId = activeArrangementId_;
         for (auto& arr : currentArrangements_) {
             if (arr.id.has_value() && *arr.id == *targetArrId) {
@@ -1025,6 +1319,8 @@ void TransportComponent::syncTracksAvailability(std::optional<int64_t> songId,
 
     lastWaveformVersion_ = audioEngine_.getWaveformVersion();
     beatPlayhead_.setWaveformData(audioEngine_.getWaveformPeaks());
+    auto layout = audioEngine_.getTimelineLayout();
+    beatPlayhead_.setTimelineLayout(std::move(layout.barPositions), layout.waveformDurationFraction);
 }
 
 void TransportComponent::rebuildTrackStrips() {
@@ -1128,6 +1424,17 @@ void TransportComponent::setSongNavigationState(bool canGoPrev, bool canGoNext) 
     if (nextSongButton_) nextSongButton_->setEnabled(canGoNext);
 }
 
+void TransportComponent::setTransitionConfig(SongTransitionMode mode, int crossfadeBars) {
+    currentCrossfadeBars_ = clampCrossfadeBars(crossfadeBars);
+    transitionBox_.setSelectedId(static_cast<int>(mode) + 1, juce::dontSendNotification);
+    if (crossfadeBarsStepper_) {
+        crossfadeBarsStepper_->setValue(currentCrossfadeBars_);
+    }
+    crossfadeBarsLabel_.setText(currentCrossfadeBars_ == 1 ? "bar" : "bars", juce::dontSendNotification);
+    resized();
+    repaint();
+}
+
 void TransportComponent::timerCallback() {
     int deviceChannels = std::max(1, audioEngine_.getCurrentOutputChannels());
     if (deviceChannels != lastDeviceChannelCount_) {
@@ -1142,13 +1449,16 @@ void TransportComponent::timerCallback() {
     if (wfVer != lastWaveformVersion_) {
         lastWaveformVersion_ = wfVer;
         beatPlayhead_.setWaveformData(audioEngine_.getWaveformPeaks());
+        auto layout = audioEngine_.getTimelineLayout();
+        beatPlayhead_.setTimelineLayout(std::move(layout.barPositions), layout.waveformDurationFraction);
     }
 
-    bool hasTracks = audioEngine_.hasLoadedTracks();
-    bool showWaveform = hasTracks && useTracksToggle_.getToggleState();
+    bool showWaveform = audioEngine_.isStructuredTimelineMode();
     double totalBarsElapsed = audioEngine_.getTotalBarsElapsed();
     bool leadingCount = audioEngine_.hasLeadingCountSection();
     int queuedSec = audioEngine_.getQueuedSectionIndex();
+    int selectedStartSec = audioEngine_.getSelectedStartSectionIndex();
+    bool inSectionStartCountIn = audioEngine_.isInSectionStartCountIn();
 
     if (leadingCount != lastSectionLeadingCount_) {
         lastSectionLeadingCount_ = leadingCount;
@@ -1159,22 +1469,49 @@ void TransportComponent::timerCallback() {
     bool canSkipFwd = false;
     bool canRepeat = false;
     bool repeatActive = false;
-    if (playing && showWaveform && !currentSectionSpans_.empty()) {
-        int currentBar = static_cast<int>(std::floor(std::max(0.0, totalBarsElapsed)));
-        SectionContext ctx = computeSectionContext(currentSectionSpans_, currentBar);
-        const int secCount = static_cast<int>(currentSectionSpans_.size());
-        canSkipBack = canSkipSectionInDirection(secCount, ctx, queuedSec, -1);
-        canSkipFwd = canSkipSectionInDirection(secCount, ctx, queuedSec, 1);
-        canRepeat = canRepeatCurrentSection(secCount, ctx);
-        repeatActive = canRepeat && (queuedSec == ctx.currentSectionIndex);
+    if (showWaveform && !currentSectionSpans_.empty()) {
+        if (playing) {
+            int currentBar = static_cast<int>(std::floor(std::max(0.0, totalBarsElapsed)));
+            SectionContext ctx = computeSectionContext(currentSectionSpans_, currentBar);
+            const int secCount = static_cast<int>(currentSectionSpans_.size());
+            canSkipBack = canSkipSectionInDirection(secCount, ctx, queuedSec, -1);
+            canSkipFwd = canSkipSectionInDirection(secCount, ctx, queuedSec, 1);
+            canRepeat = canRepeatCurrentSection(secCount, ctx);
+            repeatActive = canRepeat && (queuedSec == ctx.currentSectionIndex);
+        } else {
+            canSkipBack = canStepStartSection(currentSectionSpans_, selectedStartSec, -1);
+            canSkipFwd = canStepStartSection(currentSectionSpans_, selectedStartSec, 1);
+        }
     }
-    if (skipBackButton_) skipBackButton_->setEnabled(canSkipBack);
-    if (skipForwardButton_) skipForwardButton_->setEnabled(canSkipFwd);
+    if (skipBackButton_) {
+        skipBackButton_->setEnabled(canSkipBack);
+        skipBackButton_->setTooltip(playing ? "Skip Back to Previous Section" : "Select Earlier Start Section");
+    }
+    if (skipForwardButton_) {
+        skipForwardButton_->setEnabled(canSkipFwd);
+        skipForwardButton_->setTooltip(playing ? "Skip Forward to Next Section" : "Select Later Start Section");
+    }
+    const bool clickLoopOn = audioEngine_.isClickLoopEnabled();
     if (repeatSectionButton_) {
-        repeatSectionButton_->setEnabled(canRepeat);
-        repeatSectionButton_->setActiveHighlight(repeatActive);
-        repeatSectionButton_->setBaseColour(repeatActive ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
-        repeatSectionButton_->setTooltip(repeatActive ? "Cancel Repeat Current Section" : "Repeat Current Section");
+        if (showWaveform) {
+            repeatSectionButton_->setEnabled(canRepeat);
+            repeatSectionButton_->setActiveHighlight(repeatActive);
+            repeatSectionButton_->setBaseColour(repeatActive ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
+            repeatSectionButton_->setTooltip(repeatActive ? "Cancel Repeat Current Section" : "Repeat Current Section");
+        } else {
+            repeatSectionButton_->setEnabled(true);
+            repeatSectionButton_->setActiveHighlight(clickLoopOn);
+            repeatSectionButton_->setBaseColour(clickLoopOn ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
+            if (playing) {
+                repeatSectionButton_->setTooltip(clickLoopOn
+                                                     ? "Loop Active - Click to End After This Bar"
+                                                     : "Ending After This Bar - Click to Keep Looping");
+            } else {
+                repeatSectionButton_->setTooltip(clickLoopOn
+                                                     ? "Loop Click Bar (Active)"
+                                                     : "Loop Click Bar (Off - Plays 1 Bar After Count-In)");
+            }
+        }
     }
 
     beatPlayhead_.updatePlayhead(totalBarsElapsed,
@@ -1189,7 +1526,10 @@ void TransportComponent::timerCallback() {
                                 audioEngine_.getTrackBarCount(),
                                 audioEngine_.isLoadingTracks(),
                                 leadingCount,
-                                queuedSec);
+                                queuedSec,
+                                selectedStartSec,
+                                inSectionStartCountIn,
+                                clickLoopOn);
 
     outputMeter_.updatePeaks(audioEngine_.getOutputPeaks());
 }
@@ -1240,11 +1580,11 @@ void TransportComponent::setLayoutMode(LayoutMode mode) {
 
 void TransportComponent::paint(juce::Graphics& g) {
     if (layoutMode_ == LayoutMode::ExpandedPanel) {
-        g.fillAll(AppTheme::bgDark);
+        g.fillAll(AppTheme::pageBgLive);
         auto panelBounds = getLocalBounds().toFloat().reduced(0.5f);
-        g.setColour(AppTheme::bgDark.brighter(0.03f));
+        g.setColour(AppTheme::pageBgLive.brighter(0.04f));
         g.fillRoundedRectangle(panelBounds, 6.0f);
-        g.setColour(AppTheme::borderCol);
+        g.setColour(AppTheme::borderCol.interpolatedWith(AppTheme::tabLiveAccent, 0.28f));
         g.drawRoundedRectangle(panelBounds, 6.0f, 1.0f);
 
         for (const auto& strip : faderStripBounds_) {
@@ -1274,7 +1614,13 @@ void TransportComponent::resized() {
         songArtistLabel_.setBounds(headerRow.removeFromTop(18));
         headerRow.removeFromTop(8);
         auto badgeRow = headerRow.removeFromTop(24);
-        tempoEditor_.setBounds(badgeRow.removeFromLeft(48));
+        tempoDownButton_.setVisible(true);
+        tempoUpButton_.setVisible(true);
+        tempoDownButton_.setBounds(badgeRow.removeFromLeft(22));
+        badgeRow.removeFromLeft(2);
+        tempoEditor_.setBounds(badgeRow.removeFromLeft(46));
+        badgeRow.removeFromLeft(2);
+        tempoUpButton_.setBounds(badgeRow.removeFromLeft(22));
         badgeRow.removeFromLeft(4);
         bpmSuffixLabel_.setBounds(badgeRow.removeFromLeft(32));
         badgeRow.removeFromLeft(10);
@@ -1286,7 +1632,7 @@ void TransportComponent::resized() {
         timeSigBox_.setBounds(badgeRow.removeFromLeft(68));
         badgeRow.removeFromLeft(12);
         useTracksToggle_.setBounds(badgeRow.removeFromLeft(96));
-        const bool showArrBox = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState() && !currentArrangements_.empty();
+        const bool showArrBox = !currentArrangements_.empty();
         arrangementBox_.setVisible(showArrBox);
         if (showArrBox) {
             badgeRow.removeFromLeft(4);
@@ -1299,18 +1645,48 @@ void TransportComponent::resized() {
 
         area.removeFromTop(12);
 
-        // Transport controls row: Previous Song | Skip Back | Play/Pause | Stop | Repeat Section | Skip Forward | Next Song
+        // Transport controls row: Previous Song | Skip Back | Play/Pause | Stop | Repeat Section | Skip Forward | Next Song   [Transition Dropdown] [Bars]
         auto transportRow = area.removeFromTop(36);
         prevSongButton_->setVisible(true);
         skipBackButton_->setVisible(true);
         repeatSectionButton_->setVisible(true);
         skipForwardButton_->setVisible(true);
         nextSongButton_->setVisible(true);
+        transitionBox_.setVisible(true);
+
+        const bool showCrossfadeInput = (transitionBox_.getSelectedId() == 4);
+        if (crossfadeBarsStepper_) crossfadeBarsStepper_->setVisible(showCrossfadeInput);
+        crossfadeBarsLabel_.setVisible(showCrossfadeInput);
+
         const int btnGap = 8;
         const int iconBtnW = 46;
         const int playW = 60;
         const int totalBtnW = iconBtnW * 6 + playW + btnGap * 6;
-        auto btnGroup = transportRow.withSizeKeepingCentre(std::min(transportRow.getWidth(), totalBtnW), 36);
+        const int xfInputW = showCrossfadeInput ? (4 + 42 + 4 + 30) : 0; // gap + stepper + gap + "bars"
+        const int maxRightBlockW = std::max(140, transportRow.getWidth() - totalBtnW - 12);
+        const int dropdownW = showCrossfadeInput
+                                  ? std::clamp(maxRightBlockW - xfInputW, 92, 118)
+                                  : std::clamp(maxRightBlockW, 136, 178);
+        const int totalRightW = dropdownW + xfInputW;
+
+        auto rightBlock = juce::Rectangle<int>(transportRow.getRight() - totalRightW,
+                                               transportRow.getY() + 4,
+                                               totalRightW,
+                                               28);
+        transitionBox_.setBounds(rightBlock.removeFromLeft(dropdownW));
+        if (showCrossfadeInput) {
+            rightBlock.removeFromLeft(4);
+            if (crossfadeBarsStepper_) crossfadeBarsStepper_->setBounds(rightBlock.removeFromLeft(42));
+            rightBlock.removeFromLeft(4);
+            crossfadeBarsLabel_.setBounds(rightBlock);
+        }
+
+        const int rightEdgeForBtns = transportRow.getRight() - totalRightW - 12;
+        const int centeredX = transportRow.getX() + (transportRow.getWidth() - totalBtnW) / 2;
+        const int maxBtnX = rightEdgeForBtns - totalBtnW;
+        const int btnX = std::max(transportRow.getX(), std::min(centeredX, maxBtnX));
+        const int availBtnW = std::min(totalBtnW, std::max(0, rightEdgeForBtns - btnX));
+        auto btnGroup = juce::Rectangle<int>(btnX, transportRow.getY(), availBtnW, 36);
         prevSongButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
         btnGroup.removeFromLeft(btnGap);
         skipBackButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
@@ -1333,11 +1709,7 @@ void TransportComponent::resized() {
 
         area.removeFromTop(14);
 
-        // Bottom area: Shorter Vertical Mixer Faders (Master, Click, [8th Click], [16th Click], Guide + per-track strips) + Output Peak Meters
-        const int maxMixerH = 260;
-        if (area.getHeight() > maxMixerH) {
-            area = area.removeFromTop(maxMixerH);
-        }
+        // Bottom area: Full-height Vertical Mixer Faders (Master, Click, [8th Click], [16th Click], Guide + per-track strips) + Output Peak Meters
         const bool hasTrackStrips = !trackStrips_.empty() && useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
         const bool showEighths = eighthsToggle_.getToggleState();
         const bool showSixteenths = sixteenthsToggle_.getToggleState();
@@ -1359,12 +1731,12 @@ void TransportComponent::resized() {
         auto layoutBaseStrip = [](juce::Rectangle<int> strip, juce::Label& lbl, juce::ComboBox* chBox, juce::Slider& slider) {
             auto inner = strip.reduced(4, 8);
             lbl.setBounds(inner.removeFromTop(18));
-            inner.removeFromTop(4);
-            auto chArea = inner.removeFromTop(22);
+            inner.removeFromTop(6);
+            auto chArea = inner.removeFromBottom(22);
             if (chBox != nullptr) {
                 chBox->setBounds(chArea);
             }
-            inner.removeFromTop(6);
+            inner.removeFromBottom(6);
             slider.setBounds(inner);
         };
 
@@ -1421,6 +1793,11 @@ void TransportComponent::resized() {
     faderStripBounds_.clear();
     prevSongButton_->setVisible(false);
     nextSongButton_->setVisible(false);
+    transitionBox_.setVisible(false);
+    if (crossfadeBarsStepper_) crossfadeBarsStepper_->setVisible(false);
+    crossfadeBarsLabel_.setVisible(false);
+    tempoDownButton_.setVisible(false);
+    tempoUpButton_.setVisible(false);
     skipBackButton_->setVisible(true);
     repeatSectionButton_->setVisible(true);
     skipForwardButton_->setVisible(true);

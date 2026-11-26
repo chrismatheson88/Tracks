@@ -12,6 +12,7 @@ public:
     ~BeatPlayheadComponent() override = default;
 
     void setWaveformData(std::vector<float> peaks);
+    void setTimelineLayout(std::vector<double> barPositions, double waveformDurationFraction);
     void setSections(std::vector<SongSection> sections);
 
     void updatePlayhead(double totalBarsElapsed,
@@ -26,7 +27,10 @@ public:
                         int trackBarCount = 0,
                         bool isLoadingTracks = false,
                         bool hasLeadingCountSection = false,
-                        int queuedSectionIndex = -1);
+                        int queuedSectionIndex = -1,
+                        int selectedStartSectionIndex = -1,
+                        bool isSectionStartCountIn = false,
+                        bool clickLoopEnabled = true);
 
     void paint(juce::Graphics& g) override;
 
@@ -43,9 +47,14 @@ private:
     bool isLoadingTracks_ = false;
     bool hasLeadingCountSection_ = false;
     int queuedSectionIndex_ = -1;
+    int selectedStartSectionIndex_ = -1;
+    bool isSectionStartCountIn_ = false;
+    bool clickLoopEnabled_ = true;
     double trackDurationBars_ = 0.0;
     int trackBarCount_ = 0;
     std::vector<float> waveformPeaks_;
+    std::vector<double> barPositions_;
+    double waveformDurationFraction_ = 1.0;
     std::vector<SongSection> sections_;
 };
 

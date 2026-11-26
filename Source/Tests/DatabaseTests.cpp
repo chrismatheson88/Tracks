@@ -152,6 +152,8 @@ void runDatabaseTests() {
     quietKeys.stereoOutput = true;
     quietArr.tracks.push_back(quietKeys);
     quietArr.sections.push_back({ std::nullopt, "Soft Intro", 2, 0 });
+    quietArr.tempoPoints.push_back({ std::nullopt, 5, 1.0, 64.0, 2.0, 0 }); // Ritardando from Bar 5 over 2 bars
+    quietArr.tempoPoints.push_back({ std::nullopt, 9, 1.0, 72.0, 0.0, 1 }); // Instant step at Bar 9
 
     multiSong.arrangements.push_back(loudArr);
     multiSong.arrangements.push_back(quietArr);
@@ -193,6 +195,11 @@ void runDatabaseTests() {
     assert(std::abs(pickedArr->clickEighthsGain - 0.7f) < 1e-4f);
     assert(pickedArr->tracks.size() == 1 && pickedArr->tracks[0].name == "Keys");
     assert(pickedArr->sections.size() == 1 && pickedArr->sections[0].name == "Soft Intro");
+    assert(pickedArr->tempoPoints.size() == 2);
+    assert(pickedArr->tempoPoints[0].bar == 5 && std::abs(pickedArr->tempoPoints[0].bpm - 64.0) < 1e-4 &&
+           std::abs(pickedArr->tempoPoints[0].rampBars - 2.0) < 1e-4);
+    assert(pickedArr->tempoPoints[1].bar == 9 && std::abs(pickedArr->tempoPoints[1].bpm - 72.0) < 1e-4 &&
+           std::abs(pickedArr->tempoPoints[1].rampBars - 0.0) < 1e-4);
 
     // Re-saving the song preserves existing arrangement IDs so setlist_items.arrangement_id stays linked
     auto loadedMulti = db.loadSong(*savedMulti.id);
@@ -203,6 +210,31 @@ void runDatabaseTests() {
     assert(*resavedMulti.arrangements[1].id == quietId);
     auto reloadedArrSet = db.loadSetlist(*savedArrSet.id);
     assert(reloadedArrSet->entries[0].arrangementId.value_or(0) == quietId);
+
+    // Trackless arrangement (click/guide-only with sections and tempo map)
+    tracks::SongArrangement tracklessArr;
+    tracklessArr.name = "Acoustic Click Only";
+    tracklessArr.tempo = 76;
+    tracklessArr.key = "D";
+    tracklessArr.timeSignature = "3/4";
+    tracklessArr.sections.push_back({std::nullopt, "Verse 1", 8, 0});
+    tracklessArr.sections.push_back({std::nullopt, "Chorus", 8, 1});
+    tracklessArr.tempoPoints.push_back({std::nullopt, 15, 1.0, 62.0, 2.0, 0});
+    resavedMulti.arrangements.push_back(tracklessArr);
+    auto savedWithTrackless = db.saveSong(resavedMulti);
+    assert(savedWithTrackless.arrangements.size() == 3);
+    assert(savedWithTrackless.arrangements[2].id.has_value());
+    assert(savedWithTrackless.arrangements[2].tracks.empty());
+    assert(savedWithTrackless.arrangements[2].sections.size() == 2);
+    assert(savedWithTrackless.arrangements[2].tempoPoints.size() == 1);
+
+    tracks::SetlistEntry tracklessEntry;
+    tracklessEntry.songId = *savedWithTrackless.id;
+    tracklessEntry.arrangementId = savedWithTrackless.arrangements[2].id;
+    tracklessEntry.song = savedWithTrackless;
+    assert(tracklessEntry.getEffectiveTempo() == 76);
+    assert(tracklessEntry.getEffectiveKey() == "D");
+    assert(tracklessEntry.getEffectiveTimeSignature() == "3/4");
 
     // Test 3: Save and load Setlist with overrides
     std::cout << "[Test] Saving Setlist with overrides..." << std::endl;
@@ -218,6 +250,8 @@ void runDatabaseTests() {
     entry.overrideTempo = 80; // Overridden tempo
     entry.overrideKey = "A";   // Overridden key
     entry.overrideTimeSignature = "6/8";
+    entry.transitionMode = tracks::SongTransitionMode::Crossfade;
+    entry.transitionCrossfadeBars = 3;
     set.entries.push_back(entry);
 
     tracks::Setlist savedSet = db.saveSetlist(set);
@@ -232,6 +266,8 @@ void runDatabaseTests() {
     assert(loadedSet->entries[0].overrideTempo.value_or(0) == 80);
     assert(loadedSet->entries[0].overrideKey.value_or("") == "A");
     assert(loadedSet->entries[0].overrideTimeSignature.value_or("") == "6/8");
+    assert(loadedSet->entries[0].transitionMode == tracks::SongTransitionMode::Crossfade);
+    assert(loadedSet->entries[0].transitionCrossfadeBars == 3);
     assert(loadedSet->entries[0].song.has_value());
     assert(loadedSet->entries[0].song->title == "Amazing Grace");
     assert(loadedSet->entries[0].getEffectiveTempo() == 80);

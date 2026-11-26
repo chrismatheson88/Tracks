@@ -1,12 +1,16 @@
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "../Audio/Metronome.h"
+#include "../Audio/MidiTempoImporter.h"
 #include "../Audio/PitchShiftUtils.h"
 #include "../Audio/SectionJumpUtils.h"
 #include "../Models/AvailableSections.h"
+#include "../Database/DatabaseService.h"
 #include "../Services/AudioAttachmentService.h"
+#include "../Services/LibraryBackupService.h"
 #include <signalsmith-stretch.h>
 #include <cassert>
+#include <fstream>
 #include <iostream>
 #include <cmath>
 
@@ -474,6 +478,105 @@ void testPitchShiftLogic() {
     }
     double measuredHz = static_cast<double>(crossings) * kSampleRate / 14000.0;
     assert(std::abs(measuredHz - 880.0) < 35.0);
+
+    // 4. Tempo stretch UI +/-10 BPM limits & wide DSP speed ratio support
+    std::cout << "[Test] Tempo Stretch Limits, Metronome Continuity, and Time-Stretch Alignment..." << std::endl;
+    {
+        auto [lo120, hi120] = tracks::getAllowedTrackTempoRange(120);
+        assert(lo120 == 110 && hi120 == 130);
+        assert(tracks::clampTrackTempoForUi(145, 120) == 130);
+        assert(tracks::clampTrackTempoForUi(95, 120) == 110);
+        assert(tracks::clampTrackTempoForUi(124, 120) == 124);
+
+        auto [lo25, hi25] = tracks::getAllowedTrackTempoRange(25);
+        assert(lo25 == 20 && hi25 == 35);
+        auto [lo296, hi296] = tracks::getAllowedTrackTempoRange(296);
+        assert(lo296 == 286 && hi296 == 300);
+
+        // Underlying DSP engine ratio supports far beyond +/-10 BPM (0.25x to 4.0x)
+        assert(std::abs(tracks::computeTempoSpeedRatio(120, 180) - 1.5) < 1e-6);
+        assert(std::abs(tracks::computeTempoSpeedRatio(120, 60) - 0.5) < 1e-6);
+        assert(std::abs(tracks::computeTempoSpeedRatio(120, 240) - 2.0) < 1e-6);
+    }
+
+    // 5. Metronome live tempo change preserves exact bar position (zero jump)
+    {
+        tracks::Metronome m;
+        m.prepare(44100.0);
+        m.setTempo(120);
+        m.setTimeSignature("4/4");
+        const int64_t fpb120 = m.getFramesPerBar();
+        assert(m.getFramesPerBarForTempo(120) == fpb120);
+
+        // Advance to bar 4.5
+        juce::AudioBuffer<float> tmp(2, static_cast<int>(fpb120 / 2));
+        for (int i = 0; i < 9; ++i) {
+            tmp.clear();
+            m.renderBlock(tmp, 0, tmp.getNumSamples());
+        }
+        assert(std::abs(m.getTotalBarsElapsed() - 4.5) < 1e-4);
+
+        // Change tempo live to 128 BPM -> bar position must remain 4.5!
+        m.setTempo(128);
+        assert(std::abs(m.getTotalBarsElapsed() - 4.5) < 1e-3);
+        assert(m.getFramesPerBarForTempo(120) == fpb120);
+        assert(m.getFramesPerBar() < fpb120);
+    }
+
+    // 6. Signalsmith Stretch time-stretch impulse alignment at 1.25x faster & 0.80x slower (beyond +/-10 BPM!)
+    auto verifyTimeStretchRate = [](double exactRate, float transposeSemitones) {
+        constexpr float kSr = 44100.0f;
+        constexpr int kOutTotal = 24000;
+        constexpr int kImpulseOutTarget = 12000;
+        const int kImpulseSrcPos = static_cast<int>(std::llround(kImpulseOutTarget * exactRate));
+        const int kSrcLen = static_cast<int>(std::ceil((kOutTotal + 8000) * exactRate)) + 16384;
+
+        std::vector<float> src(static_cast<size_t>(kSrcLen), 0.0f);
+        src[static_cast<size_t>(kImpulseSrcPos)] = 1.0f;
+
+        signalsmith::stretch::SignalsmithStretch<float> st;
+        st.presetDefault(1, kSr, true /* splitComputation */);
+        st.setTransposeSemitones(transposeSemitones);
+
+        const int inLat = st.inputLatency();
+        const int outLat = st.outputLatency();
+        const int outLatSrc = static_cast<int>(std::round(exactRate * outLat));
+        const int totalLatSrc = inLat + outLatSrc;
+        const int primeIn = inLat + outLatSrc;
+        const int primeOut = static_cast<int>(std::round(static_cast<double>(inLat) / exactRate)) + outLat;
+
+        std::vector<float> pOutBuf(static_cast<size_t>(primeOut), 0.0f);
+        float* pIn[1] = { src.data() };
+        float* pOut[1] = { pOutBuf.data() };
+        st.process(pIn, primeIn, pOut, primeOut);
+
+        int64_t inCursor = primeIn;
+        std::vector<float> out(static_cast<size_t>(kOutTotal), 0.0f);
+        for (int outPos = 0; outPos < kOutTotal; outPos += 512) {
+            int avail = std::min(512, kOutTotal - outPos);
+            int64_t blockInEnd = static_cast<int64_t>(std::llround(static_cast<double>(outPos + avail) * exactRate + totalLatSrc));
+            int inCount = std::max(0, static_cast<int>(blockInEnd - inCursor));
+            float* inPtr[1] = { src.data() + inCursor };
+            float* outPtr[1] = { out.data() + outPos };
+            st.process(inPtr, inCount, outPtr, avail);
+            inCursor += inCount;
+        }
+
+        int bestIdx = 0;
+        float bestVal = 0.0f;
+        for (int i = 0; i < kOutTotal; ++i) {
+            if (std::abs(out[static_cast<size_t>(i)]) > bestVal) {
+                bestVal = std::abs(out[static_cast<size_t>(i)]);
+                bestIdx = i;
+            }
+        }
+        assert(bestVal > 0.35f);
+        assert(std::abs(bestIdx - kImpulseOutTarget) <= 128);
+    };
+
+    verifyTimeStretchRate(1.25, 0.0f);  // +25% faster (e.g. 120 -> 150 BPM)
+    verifyTimeStretchRate(0.80, 0.0f);  // -20% slower (e.g. 120 -> 96 BPM)
+    verifyTimeStretchRate(1.08, 3.0f);  // +8% faster + +3 semitones simultaneously
 }
 
 void testQueuedSectionSkipLogic() {
@@ -627,6 +730,336 @@ void testQueuedSectionSkipLogic() {
     assert(std::abs(postJump.getSample(1, 0) - 0.5f) < 1e-5f);
     assert(std::abs(postJump.getSample(1, 59) - 0.5f) < 1e-5f);
     assert(std::abs(postJump.getSample(1, 60) - 0.0f) < 1e-5f);
+
+    // Pre-play start section selection (stopped mode):
+    // With leading Count: [0: Count, 1: Intro, 2: Verse 1, 3: Chorus 1, 4: Bridge, 5: Chorus 2]
+    assert(tracks::getDefaultStartSectionIndex(spans) == 1);
+    assert(!tracks::canStepStartSection(spans, -1, -1));
+    assert(tracks::canStepStartSection(spans, -1, 1));
+    int startSel = tracks::computeNextStartSection(spans, -1, 1);
+    assert(startSel == 2); // Verse 1
+    startSel = tracks::computeNextStartSection(spans, startSel, 1);
+    assert(startSel == 3); // Chorus 1
+    startSel = tracks::computeNextStartSection(spans, startSel, 1);
+    assert(startSel == 4); // Bridge
+    startSel = tracks::computeNextStartSection(spans, startSel, 1);
+    assert(startSel == 5); // Chorus 2 (last)
+    assert(!tracks::canStepStartSection(spans, startSel, 1));
+    assert(tracks::canStepStartSection(spans, startSel, -1));
+    // Step back down to default (-1 = start from beginning)
+    startSel = tracks::computeNextStartSection(spans, 2, -1);
+    assert(startSel == -1);
+
+    // Without leading Count: [0: Intro, 1: Verse 1, 2: Outro]
+    std::vector<tracks::SongSection> noLeadSecs = {
+        { std::nullopt, "Intro", 4, 0 },
+        { std::nullopt, "Verse 1", 8, 1 },
+        { std::nullopt, "Outro", 4, 2 }
+    };
+    auto noLeadSpans = tracks::buildSectionSpans(noLeadSecs, false);
+    assert(tracks::getDefaultStartSectionIndex(noLeadSpans) == 0);
+    assert(tracks::computeNextStartSection(noLeadSpans, -1, 1) == 1); // Verse 1
+    assert(tracks::computeNextStartSection(noLeadSpans, 1, 1) == 2);  // Outro
+    assert(tracks::computeNextStartSection(noLeadSpans, 1, -1) == -1); // Back to beginning
+
+    // Verify jumping Metronome to (targetSpan.startBar - 1) gives the normal 1-bar section cue on beat 1
+    met.reset();
+    met.setSections(noLeadSecs);
+    met.setUseSectionCountIn(true);
+    const auto& outroSpan = noLeadSpans[2]; // Outro starts at timeline bar 14 (2 prepended + 4 + 8)
+    assert(outroSpan.startBar == 14);
+    const int cueBar = outroSpan.startBar - 1;
+    assert(met.getScheduledGuideCueForBeat(cueBar, 0) == "section:outro");
+    assert(met.getScheduledGuideCueForBeat(cueBar, 1) == "two");
+    assert(met.getScheduledGuideCueForBeat(cueBar, 2) == "three");
+    assert(met.getScheduledGuideCueForBeat(cueBar, 3) == "four");
+
+    // Song end & crossfade transition planning tests (1..4 bar crossfade)
+    {
+        auto pStay = tracks::computeSongTransitionPlan(2, 32, tracks::SongTransitionMode::StayInCurrentSong, 2, true);
+        assert(pStay.endBar == 34 && pStay.triggerBar == 34 && !pStay.isCrossfade);
+
+        auto pCue = tracks::computeSongTransitionPlan(2, 32, tracks::SongTransitionMode::CueNextSong, 2, true);
+        assert(pCue.endBar == 34 && pCue.triggerBar == 34 && !pCue.isCrossfade);
+
+        auto pAuto = tracks::computeSongTransitionPlan(2, 32, tracks::SongTransitionMode::AutoplayNextSong, 2, true);
+        assert(pAuto.endBar == 34 && pAuto.triggerBar == 34 && !pAuto.isCrossfade);
+
+        auto pXf1 = tracks::computeSongTransitionPlan(2, 32, tracks::SongTransitionMode::Crossfade, 1, true);
+        assert(pXf1.endBar == 34 && pXf1.triggerBar == 33 && pXf1.isCrossfade);
+
+        auto pXf3 = tracks::computeSongTransitionPlan(0, 68, tracks::SongTransitionMode::Crossfade, 3, true);
+        assert(pXf3.endBar == 68 && pXf3.triggerBar == 65 && pXf3.isCrossfade);
+
+        // Values > 4 clamp to max 4 bars; values < 1 clamp to min 1 bar
+        auto pXfMax = tracks::computeSongTransitionPlan(0, 68, tracks::SongTransitionMode::Crossfade, 9, true);
+        assert(pXfMax.endBar == 68 && pXfMax.triggerBar == 64 && pXfMax.isCrossfade);
+        auto pXfMin = tracks::computeSongTransitionPlan(0, 68, tracks::SongTransitionMode::Crossfade, 0, true);
+        assert(pXfMin.endBar == 68 && pXfMin.triggerBar == 67 && pXfMin.isCrossfade);
+
+        // Last song in set (hasNextSong = false): never crossfades early
+        auto pLast = tracks::computeSongTransitionPlan(0, 68, tracks::SongTransitionMode::Crossfade, 4, false);
+        assert(pLast.endBar == 68 && pLast.triggerBar == 68 && !pLast.isCrossfade);
+
+        // Very short 2-bar song with Crossfade 4 bars clamps cleanly so at least 1 bar plays first
+        auto pShort = tracks::computeSongTransitionPlan(2, 2, tracks::SongTransitionMode::Crossfade, 4, true);
+        assert(pShort.endBar == 4 && pShort.triggerBar == 3 && pShort.isCrossfade);
+    }
+}
+
+void testLibraryBackupAndImportRoundTrip() {
+    std::cout << "[Test] Library Backup Export & Import Round-Trip..." << std::endl;
+    namespace fs = std::filesystem;
+
+    auto baseTmp = fs::temp_directory_path() / "tracks_backup_unit_test";
+    std::error_code ec;
+    fs::remove_all(baseTmp, ec);
+    fs::create_directories(baseTmp);
+
+    auto rootA = baseTmp / "machineA";
+    auto rootB = baseTmp / "machineB";
+    auto tracksA = rootA / "uploaded_tracks";
+    auto tracksB = rootB / "uploaded_tracks";
+    fs::create_directories(tracksA / "1_Test_Song" / "1_Main" / "tracks");
+    fs::create_directories(rootB);
+
+    // Create a mock audio file under machineA/uploaded_tracks/...
+    auto stemPathA = tracksA / "1_Test_Song" / "1_Main" / "tracks" / "Keys.wav";
+    const std::string stemBytes = "RIFF_MOCK_AUDIO_PAYLOAD_1234567890";
+    {
+        std::ofstream ofs(stemPathA, std::ios::binary);
+        ofs << stemBytes;
+    }
+
+    auto zipFile = baseTmp / "test_library_backup.zip";
+    {
+        tracks::DatabaseService dbA((rootA / "tracks_library.sqlite3").string());
+        tracks::Song song;
+        song.title = "Test Song";
+        song.artist = "Test Band";
+        song.tempo = 124;
+        song.key = "G";
+        song.timeSignature = "4/4";
+
+        tracks::SongArrangement arr;
+        arr.name = "Main";
+        arr.tempo = 124;
+        arr.key = "G";
+        arr.timeSignature = "4/4";
+        arr.clickEighths = true;
+        tracks::SongTrack trk;
+        trk.name = "Keys";
+        trk.filePath = fs::absolute(stemPathA).string();
+        trk.outputChannel = 2;
+        trk.stereoOutput = true;
+        trk.gain = 0.75f;
+        arr.tracks.push_back(trk);
+        arr.sections.push_back({ std::nullopt, "Intro", 4, 0 });
+        arr.sections.push_back({ std::nullopt, "Chorus 1", 8, 1 });
+        song.arrangements.push_back(arr);
+
+        auto savedSong = dbA.saveSong(song);
+        assert(savedSong.id.has_value());
+
+        tracks::Setlist sl;
+        sl.name = "Sunday Morning";
+        sl.setDate = "2026-12-01";
+        tracks::SetlistEntry entry;
+        entry.songId = *savedSong.id;
+        entry.orderIndex = 0;
+        entry.overrideTempo = 128;
+        entry.overrideKey = "A";
+        sl.entries.push_back(entry);
+        dbA.saveSetlist(sl);
+        dbA.setAppSetting("audio.click_pack", "Classic");
+
+        auto expRes = tracks::LibraryBackupService::exportBackup(dbA, zipFile.string(), tracksA);
+        assert(expRes.success);
+        assert(expRes.songCount == 1);
+        assert(expRes.setlistCount == 1);
+        assert(expRes.audioFileCount == 1);
+        assert(fs::exists(zipFile));
+    }
+
+    // Import into a completely separate directory (machineB) and verify full restore + path remapping
+    {
+        tracks::DatabaseService dbB((rootB / "tracks_library.sqlite3").string());
+        bool beforeReplaceCalled = false;
+        auto impRes = tracks::LibraryBackupService::importBackup(
+            dbB,
+            zipFile.string(),
+            tracksB,
+            [&]() { beforeReplaceCalled = true; });
+        assert(impRes.success);
+        assert(beforeReplaceCalled);
+        assert(impRes.songCount == 1);
+        assert(impRes.setlistCount == 1);
+        assert(impRes.audioFileCount == 1);
+
+        auto songs = dbB.listSongs();
+        assert(songs.size() == 1);
+        assert(songs[0].title == "Test Song");
+        assert(songs[0].arrangements.size() == 1);
+        assert(songs[0].arrangements[0].clickEighths == true);
+        assert(songs[0].arrangements[0].sections.size() == 2);
+        assert(songs[0].arrangements[0].tracks.size() == 1);
+
+        const std::string restoredPath = songs[0].arrangements[0].tracks[0].filePath;
+        assert(restoredPath.find("machineB") != std::string::npos);
+        assert(fs::exists(restoredPath));
+        std::ifstream ifs(restoredPath, std::ios::binary);
+        std::string restoredBytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        assert(restoredBytes == stemBytes);
+
+        auto setlists = dbB.listSetlists();
+        assert(setlists.size() == 1);
+        assert(setlists[0].name == "Sunday Morning");
+        auto loadedSet = dbB.loadSetlist(*setlists[0].id);
+        assert(loadedSet.has_value() && loadedSet->entries.size() == 1);
+        assert(loadedSet->entries[0].overrideTempo.value_or(0) == 128);
+        assert(loadedSet->entries[0].overrideKey.value_or("") == "A");
+        assert(dbB.getAppSetting("audio.click_pack") == "Classic");
+
+        // Verify importing an invalid file fails cleanly without wiping existing library
+        auto badZip = baseTmp / "not_a_backup.zip";
+        {
+            std::ofstream ofs(badZip);
+            ofs << "invalid zip bytes";
+        }
+        auto badRes = tracks::LibraryBackupService::importBackup(dbB, badZip.string(), tracksB);
+        assert(!badRes.success);
+        assert(dbB.listSongs().size() == 1);
+    }
+
+    fs::remove_all(baseTmp, ec);
+}
+
+void testTempoMapAndMidiImport() {
+    std::cout << "[Test] TempoMap Automation, Ritardando Click Timing & MIDI Import..." << std::endl;
+
+    // 1. Exact closed-form ramp math and round-trip invertibility
+    tracks::TempoPoint slowDown;
+    slowDown.bar = 3;      // Audio Bar 3 (timeline Bar 5 when prependedCountBars = 2)
+    slowDown.beat = 1.0;
+    slowDown.bpm = 60.0;
+    slowDown.rampBars = 2.0; // Ramp 120 -> 60 BPM over 2 bars (8 beats)
+
+    tracks::TempoMap map;
+    map.rebuild(44100.0, 120.0, 1.0, "4/4", 2, { slowDown });
+    assert(map.hasTempoAutomation());
+
+    // Timeline bars 0..4 (16 beats) at constant 120 BPM => 8.0 seconds exactly
+    assert(std::abs(map.pulseToSeconds(16.0) - 8.0) < 1e-9);
+
+    // Ramp from pulse 16 to pulse 24 (8 beats, 120 -> 60 BPM):
+    // Exact duration = 60 * 8 / (60 - 120) * ln(60 / 120) = 8 * ln(2) seconds
+    const double expectedRampSec = 8.0 * std::log(2.0);
+    assert(std::abs((map.pulseToSeconds(24.0) - 8.0) - expectedRampSec) < 1e-9);
+
+    // Post-ramp bar (pulse 24 -> 28, 4 beats at 60 BPM => 4.0 seconds)
+    assert(std::abs((map.pulseToSeconds(28.0) - map.pulseToSeconds(24.0)) - 4.0) < 1e-9);
+
+    // Round-trip frame -> pulse -> frame across constant, ramp, and post-ramp regions
+    for (double p : { 0.0, 4.0, 16.0, 18.5, 21.25, 24.0, 27.5 }) {
+        int64_t f = map.pulseToFrame(p);
+        double backP = map.frameToPulse(f);
+        assert(std::abs(backP - p) < 1e-4);
+    }
+
+    // 2. Global tempoScale (e.g. -6 BPM playback override on 120 BPM = 0.95x):
+    // Every frame position must scale by exactly 1 / 0.95 everywhere on the timeline!
+    tracks::TempoMap scaledMap;
+    scaledMap.rebuild(44100.0, 120.0, 114.0 / 120.0, "4/4", 2, { slowDown });
+    for (double p : { 8.0, 16.0, 20.0, 24.0, 32.0 }) {
+        double origF = map.pulseToFrameDouble(p);
+        double scaledF = scaledMap.pulseToFrameDouble(p);
+        assert(std::abs(scaledF * (114.0 / 120.0) - origF) < 1e-6);
+    }
+
+    // 3. Compound 6/8 tempo map (60 BPM dotted-quarter = 3 eighth pulses per second)
+    tracks::TempoMap map68;
+    map68.rebuild(44100.0, 60.0, 1.0, "6/8", 0, {});
+    assert(map68.isCompound());
+    assert(map68.getPulseCountPerBar() == 6);
+    assert(std::abs(map68.pulseToSeconds(6.0) - 2.0) < 1e-9);
+
+    // 4. Metronome click impulse rendering across a ritardando (120 -> 60 BPM over 2 bars starting Audio Bar 2)
+    tracks::Metronome met;
+    met.prepare(44100.0);
+    met.setTimeSignature("4/4");
+    met.setTempo(120);
+    met.setClickChannel(0);
+    met.setClickGain(1.0f);
+    met.setGuideGain(0.0f);
+    met.setUseSectionCountIn(true);
+    met.setSections({ { std::nullopt, "Count", 1, 0 }, { std::nullopt, "Outro", 4, 1 } });
+
+    juce::AudioBuffer<float> clickImpulse(1, 4);
+    clickImpulse.clear();
+    clickImpulse.setSample(0, 0, 1.0f);
+    met.loadClickSamples(clickImpulse, clickImpulse);
+
+    tracks::TempoPoint rit;
+    rit.bar = 2; // Start slowing on Audio Bar 2 (timeline bar 1 since leading Count = 1 bar)
+    rit.beat = 1.0;
+    rit.bpm = 60.0;
+    rit.rampBars = 2.0;
+    met.setTempoMap(120, { rit });
+    met.reset();
+
+    // Render 5 bars (timeline bars 0..5) and collect every click frame
+    const int64_t totalFrames = met.getFrameForBar(5.0) + 1024;
+    std::vector<int64_t> clickFrames;
+    juce::AudioBuffer<float> block(1, 512);
+    int64_t rendered = 0;
+    while (rendered < totalFrames) {
+        int n = static_cast<int>(std::min<int64_t>(512, totalFrames - rendered));
+        block.clear();
+        met.renderBlock(block, 0, n);
+        for (int i = 0; i < n; ++i) {
+            if (block.getSample(0, i) > 0.5f) {
+                clickFrames.push_back(rendered + i);
+            }
+        }
+        rendered += n;
+    }
+
+    assert(clickFrames.size() >= 20);
+    // Bar 0 (beats 0..3): constant 120 BPM = 22050 samples per beat
+    for (int i = 0; i < 4; ++i) {
+        int64_t dt = clickFrames[static_cast<size_t>(i + 1)] - clickFrames[static_cast<size_t>(i)];
+        assert(std::abs(dt - 22050) <= 1);
+    }
+    // Bars 1..2 (beats 4..11): ritardando -> intervals strictly increase each beat
+    int64_t prevDt = 22050;
+    for (int i = 4; i < 12; ++i) {
+        int64_t dt = clickFrames[static_cast<size_t>(i + 1)] - clickFrames[static_cast<size_t>(i)];
+        assert(dt > prevDt);
+        prevDt = dt;
+    }
+    // Bars 3..4 (beats 12..15): settled at 60 BPM = 44100 samples per beat
+    for (int i = 12; i < 16; ++i) {
+        int64_t dt = clickFrames[static_cast<size_t>(i + 1)] - clickFrames[static_cast<size_t>(i)];
+        assert(std::abs(dt - 44100) <= 1);
+    }
+
+    // 5. MIDI Tempo Map parser test using synthetic Standard MIDI File (480 TPQ)
+    juce::MidiFile midi;
+    midi.setTicksPerQuarterNote(480);
+    juce::MidiMessageSequence tempoTrack;
+    tempoTrack.addEvent(juce::MidiMessage::tempoMetaEvent(500000), 0.0);               // Bar 1 Beat 1: 120 BPM
+    tempoTrack.addEvent(juce::MidiMessage::tempoMetaEvent(600000), 480.0 * 4.0 * 4.0); // Bar 5 Beat 1: 100 BPM
+    tempoTrack.addEvent(juce::MidiMessage::tempoMetaEvent(750000), 480.0 * (4.0 * 8.0 + 2.0)); // Bar 9 Beat 3: 80 BPM
+    midi.addTrack(tempoTrack);
+
+    auto midiRes = tracks::parseMidiTempoMap(midi, "4/4", 120);
+    assert(midiRes.success);
+    assert(midiRes.detectedBaseTempo.has_value() && *midiRes.detectedBaseTempo == 120);
+    assert(midiRes.points.size() == 2);
+    assert(midiRes.points[0].bar == 5 && std::abs(midiRes.points[0].beat - 1.0) < 1e-3 &&
+           std::abs(midiRes.points[0].bpm - 100.0) < 1e-2);
+    assert(midiRes.points[1].bar == 9 && std::abs(midiRes.points[1].beat - 3.0) < 1e-3 &&
+           std::abs(midiRes.points[1].bpm - 80.0) < 1e-2);
 }
 
 int main() {
@@ -636,6 +1069,8 @@ int main() {
         testSongStorageDirNaming();
         testPitchShiftLogic();
         testQueuedSectionSkipLogic();
+        testLibraryBackupAndImportRoundTrip();
+        testTempoMapAndMidiImport();
         std::cout << "[Test] All AudioEngine tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {

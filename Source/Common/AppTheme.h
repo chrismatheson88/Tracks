@@ -21,6 +21,20 @@ public:
     static const juce::Colour dangerRed;
     static const juce::Colour warningAmber;
 
+    // Header & Attached Tab Palette (derived from Tracks logo: Blue / Purple / Pink)
+    static const juce::Colour headerBg;
+    static const juce::Colour tabLibraryAccent;
+    static const juce::Colour tabLiveAccent;
+    static const juce::Colour tabSettingsAccent;
+    static const juce::Colour pageBgLibrary;
+    static const juce::Colour pageBgLive;
+    static const juce::Colour pageBgSettings;
+
+    static void paintTintedPageBackground(juce::Graphics& g,
+                                          juce::Rectangle<int> bounds,
+                                          const juce::Colour& baseBg,
+                                          const juce::Colour& accent);
+
     void drawButtonBackground(juce::Graphics& g,
                               juce::Button& button,
                               const juce::Colour& backgroundColour,

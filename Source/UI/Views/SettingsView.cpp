@@ -1,5 +1,7 @@
 #include "SettingsView.h"
 #include "../../Common/AppTheme.h"
+#include "../../Services/AudioAttachmentService.h"
+#include "../../Services/LibraryBackupService.h"
 #include <cmath>
 
 namespace tracks {
@@ -14,7 +16,7 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
 
     auto setupSection = [this](juce::Label& lbl) {
         lbl.setFont(juce::Font(12.0f, juce::Font::bold));
-        lbl.setColour(juce::Label::textColourId, AppTheme::primaryBlue);
+        lbl.setColour(juce::Label::textColourId, AppTheme::tabSettingsAccent.interpolatedWith(AppTheme::textLight, 0.28f));
         addAndMakeVisible(lbl);
     };
 
@@ -35,38 +37,19 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
             saveSetting("audio.device", name);
             channelCountLabel_.setText("Available Channels: " + juce::String(audioEngine_.getCurrentOutputChannels()),
                                        juce::dontSendNotification);
-            populateChannelBoxes();
+            applySavedChannelRouting();
         }
     };
 
     refreshDevicesButton_.onClick = [this]() {
         populateDevices();
-        populateChannelBoxes();
+        applySavedChannelRouting();
     };
     addAndMakeVisible(refreshDevicesButton_);
 
     channelCountLabel_.setFont(juce::Font(11.0f, juce::Font::plain));
     channelCountLabel_.setColour(juce::Label::textColourId, AppTheme::accentGreen);
     addAndMakeVisible(channelCountLabel_);
-
-    // Routing section
-    setupSection(routingSectionLabel_);
-
-    setupField(clickChannelLabel_);
-    clickChannelBox_.onChange = [this]() {
-        int ch = std::max(0, clickChannelBox_.getSelectedId() - 1);
-        audioEngine_.setClickChannel(ch);
-        saveSetting("volume.channel.click_db", std::to_string(ch));
-    };
-    addAndMakeVisible(clickChannelBox_);
-
-    setupField(guideChannelLabel_);
-    guideChannelBox_.onChange = [this]() {
-        int ch = std::max(0, guideChannelBox_.getSelectedId() - 1);
-        audioEngine_.setGuideChannel(ch);
-        saveSetting("volume.channel.guide_db", std::to_string(ch));
-    };
-    addAndMakeVisible(guideChannelBox_);
 
     // Assets section
     setupSection(assetsSectionLabel_);
@@ -99,6 +82,7 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
         s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 50, 20);
         s.setRange(-30.0, 6.0, 0.5);
         s.setTextValueSuffix(" dB");
+        s.setScrollWheelEnabled(false);
         addAndMakeVisible(s);
     };
 
@@ -129,7 +113,35 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine)
         saveSetting("volume.guide_db", std::to_string(dbVal));
     };
 
+    // Library Backup & Restore section
+    setupSection(backupSectionLabel_);
+    backupInfoLabel_.setFont(juce::Font(11.5f, juce::Font::plain));
+    backupInfoLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+    backupInfoLabel_.setJustificationType(juce::Justification::topLeft);
+    backupInfoLabel_.setText("Create a compressed .zip backup of your library, songs, arrangements, audio tracks, and setlists, or restore from an existing backup file.",
+                             juce::dontSendNotification);
+    addAndMakeVisible(backupInfoLabel_);
+
+    backupLibraryButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
+    backupLibraryButton_.onClick = [this]() { handleBackupLibrary(); };
+    addAndMakeVisible(backupLibraryButton_);
+
+    importBackupButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel.brighter(0.08f));
+    importBackupButton_.onClick = [this]() { handleImportBackup(); };
+    addAndMakeVisible(importBackupButton_);
+
+    backupStatusLabel_.setFont(juce::Font(11.5f, juce::Font::plain));
+    backupStatusLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+    backupStatusLabel_.setJustificationType(juce::Justification::topLeft);
+    addAndMakeVisible(backupStatusLabel_);
+
     refreshSettings();
+}
+
+SettingsView::~SettingsView() {
+    if (backupWorker_.joinable()) {
+        backupWorker_.join();
+    }
 }
 
 void SettingsView::populateDevices() {
@@ -147,33 +159,23 @@ void SettingsView::populateDevices() {
                                juce::dontSendNotification);
 }
 
-void SettingsView::populateChannelBoxes() {
+void SettingsView::applySavedChannelRouting() {
     const int numChannels = std::max(1, audioEngine_.getCurrentOutputChannels());
-
-    auto fillBox = [numChannels](juce::ComboBox& box, int currentCh) {
-        box.clear(juce::dontSendNotification);
-        for (int ch = 1; ch <= numChannels; ++ch) {
-            box.addItem("Channel " + juce::String(ch), ch);
-        }
-        box.setSelectedId(std::clamp(currentCh + 1, 1, numChannels), juce::dontSendNotification);
-    };
 
     int clickCh = 0;
     try { clickCh = std::stoi(db_.getAppSetting("volume.channel.click_db", "0")); } catch (...) {}
     clickCh = std::clamp(clickCh, 0, numChannels - 1);
-    fillBox(clickChannelBox_, clickCh);
     audioEngine_.setClickChannel(clickCh);
 
     int guideCh = 0;
     try { guideCh = std::stoi(db_.getAppSetting("volume.channel.guide_db", "0")); } catch (...) {}
     guideCh = std::clamp(guideCh, 0, numChannels - 1);
-    fillBox(guideChannelBox_, guideCh);
     audioEngine_.setGuideChannel(guideCh);
 }
 
 void SettingsView::refreshSettings() {
     populateDevices();
-    populateChannelBoxes();
+    applySavedChannelRouting();
 
     // Populate Click Sound packs (supports WAV, MP3, M4A)
     auto clickPacks = audioEngine_.getAvailableClickPacks();
@@ -224,44 +226,183 @@ void SettingsView::saveSetting(const std::string& key, const std::string& val) {
     db_.setAppSetting(key, val);
 }
 
+void SettingsView::setBackupBusy(bool busy) {
+    backupBusy_.store(busy);
+    backupLibraryButton_.setEnabled(!busy);
+    importBackupButton_.setEnabled(!busy);
+}
+
+void SettingsView::handleBackupLibrary() {
+    if (backupBusy_.load()) return;
+
+    auto now = juce::Time::getCurrentTime();
+    juce::String defaultName = "Tracks_Backup_" + now.formatted("%Y-%m-%d") + ".zip";
+    auto defaultDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    auto initialFile = defaultDir.getChildFile(defaultName);
+
+    activeFileChooser_ = std::make_unique<juce::FileChooser>(
+        "Save Library Backup",
+        initialFile,
+        "*.zip");
+
+    juce::Component::SafePointer<SettingsView> safeThis(this);
+    activeFileChooser_->launchAsync(
+        juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+        [safeThis](const juce::FileChooser& chooser) {
+            if (safeThis == nullptr) return;
+            auto chosen = chooser.getResult();
+            if (chosen == juce::File()) return;
+
+            if (!chosen.hasFileExtension(".zip")) {
+                chosen = chosen.withFileExtension(".zip");
+            }
+            safeThis->runExportBackup(chosen.getFullPathName().toStdString());
+        });
+}
+
+void SettingsView::handleImportBackup() {
+    if (backupBusy_.load()) return;
+
+    auto defaultDir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+    activeFileChooser_ = std::make_unique<juce::FileChooser>(
+        "Import Library Backup",
+        defaultDir,
+        "*.zip");
+
+    juce::Component::SafePointer<SettingsView> safeThis(this);
+    activeFileChooser_->launchAsync(
+        juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+        [safeThis](const juce::FileChooser& chooser) {
+            if (safeThis == nullptr) return;
+            auto chosen = chooser.getResult();
+            if (!chosen.existsAsFile()) return;
+
+            juce::String zipPath = chosen.getFullPathName();
+            juce::String fileName = chosen.getFileName();
+
+            juce::AlertWindow::showOkCancelBox(
+                juce::MessageBoxIconType::WarningIcon,
+                "Import Library Backup",
+                "Importing \"" + fileName + "\" will replace your current library, songs, tracks, and sets.\n\nDo you want to continue?",
+                "Import",
+                "Cancel",
+                safeThis.getComponent(),
+                juce::ModalCallbackFunction::create([safeThis, zipPath](int result) {
+                    if (safeThis == nullptr || result == 0) return;
+                    safeThis->runImportBackup(zipPath.toStdString());
+                }));
+        });
+}
+
+void SettingsView::runExportBackup(const std::string& destZipPath) {
+    if (backupWorker_.joinable()) {
+        backupWorker_.join();
+    }
+    setBackupBusy(true);
+    backupStatusLabel_.setColour(juce::Label::textColourId, AppTheme::warningAmber);
+    backupStatusLabel_.setText("Starting library backup...", juce::dontSendNotification);
+
+    const auto tracksRoot = AudioAttachmentService::getProjectRoot() / "uploaded_tracks";
+    juce::Component::SafePointer<SettingsView> safeThis(this);
+
+    backupWorker_ = std::thread([this, safeThis, destZipPath, tracksRoot]() {
+        auto progressCb = [safeThis](const std::string& msg) {
+            juce::MessageManager::callAsync([safeThis, msg]() {
+                if (safeThis == nullptr) return;
+                safeThis->backupStatusLabel_.setColour(juce::Label::textColourId, AppTheme::warningAmber);
+                safeThis->backupStatusLabel_.setText(msg, juce::dontSendNotification);
+            });
+        };
+
+        auto res = LibraryBackupService::exportBackup(db_, destZipPath, tracksRoot, progressCb);
+
+        juce::MessageManager::callAsync([safeThis, res]() {
+            if (safeThis == nullptr) return;
+            safeThis->setBackupBusy(false);
+            safeThis->backupStatusLabel_.setColour(juce::Label::textColourId,
+                                                   res.success ? AppTheme::accentGreen : AppTheme::dangerRed);
+            safeThis->backupStatusLabel_.setText(res.message, juce::dontSendNotification);
+        });
+    });
+}
+
+void SettingsView::runImportBackup(const std::string& srcZipPath) {
+    if (backupWorker_.joinable()) {
+        backupWorker_.join();
+    }
+    setBackupBusy(true);
+    backupStatusLabel_.setColour(juce::Label::textColourId, AppTheme::warningAmber);
+    backupStatusLabel_.setText("Starting backup import...", juce::dontSendNotification);
+
+    const auto tracksRoot = AudioAttachmentService::getProjectRoot() / "uploaded_tracks";
+    juce::Component::SafePointer<SettingsView> safeThis(this);
+
+    backupWorker_ = std::thread([this, safeThis, srcZipPath, tracksRoot]() {
+        auto progressCb = [safeThis](const std::string& msg) {
+            juce::MessageManager::callAsync([safeThis, msg]() {
+                if (safeThis == nullptr) return;
+                safeThis->backupStatusLabel_.setColour(juce::Label::textColourId, AppTheme::warningAmber);
+                safeThis->backupStatusLabel_.setText(msg, juce::dontSendNotification);
+            });
+        };
+
+        auto beforeReplaceCb = [this]() {
+            audioEngine_.clearAllCachedAudio();
+        };
+
+        auto res = LibraryBackupService::importBackup(db_, srcZipPath, tracksRoot, beforeReplaceCb, progressCb);
+
+        juce::MessageManager::callAsync([safeThis, res]() {
+            if (safeThis == nullptr) return;
+            safeThis->setBackupBusy(false);
+            safeThis->backupStatusLabel_.setColour(juce::Label::textColourId,
+                                                   res.success ? AppTheme::accentGreen : AppTheme::dangerRed);
+            safeThis->backupStatusLabel_.setText(res.message, juce::dontSendNotification);
+            if (res.success && safeThis->onLibraryImported) {
+                safeThis->onLibraryImported();
+            }
+        });
+    });
+}
+
 void SettingsView::paint(juce::Graphics& g) {
-    g.fillAll(AppTheme::bgDark);
+    AppTheme::paintTintedPageBackground(g, getLocalBounds(), AppTheme::pageBgSettings, AppTheme::tabSettingsAccent);
+
+    if (!backupCardBounds_.isEmpty()) {
+        auto r = backupCardBounds_.toFloat().reduced(0.5f);
+        g.setColour(AppTheme::bgPanel.interpolatedWith(AppTheme::pageBgSettings, 0.35f));
+        g.fillRoundedRectangle(r, 6.0f);
+        g.setColour(AppTheme::borderCol.interpolatedWith(AppTheme::tabSettingsAccent, 0.25f));
+        g.drawRoundedRectangle(r, 6.0f, 1.0f);
+    }
 }
 
 void SettingsView::resized() {
-    auto area = getLocalBounds().reduced(24);
+    auto fullArea = getLocalBounds().reduced(24);
 
-    titleLabel_.setBounds(area.removeFromTop(32));
-    area.removeFromTop(16);
+    titleLabel_.setBounds(fullArea.removeFromTop(32));
+    fullArea.removeFromTop(16);
 
+    // Split into left column (audio/routing/assets/volumes) and right column (Library Backup & Restore card)
+    auto leftCol = fullArea.removeFromLeft(std::min(510, fullArea.getWidth() - 320));
+    fullArea.removeFromLeft(28);
+    auto rightCol = fullArea;
+
+    auto area = leftCol;
     int rowH = 26;
     int gap = 8;
-    int sectionGap = 20;
+    int sectionGap = 18;
 
     // Device
     deviceSectionLabel_.setBounds(area.removeFromTop(20));
     area.removeFromTop(gap);
     auto dRow = area.removeFromTop(rowH);
     deviceLabel_.setBounds(dRow.removeFromLeft(120));
-    deviceBox_.setBounds(dRow.removeFromLeft(280));
+    deviceBox_.setBounds(dRow.removeFromLeft(260));
     dRow.removeFromLeft(8);
-    refreshDevicesButton_.setBounds(dRow.removeFromLeft(90));
+    refreshDevicesButton_.setBounds(dRow.removeFromLeft(84));
     area.removeFromTop(4);
     channelCountLabel_.setBounds(area.removeFromTop(18));
-
-    area.removeFromTop(sectionGap);
-
-    // Routing
-    routingSectionLabel_.setBounds(area.removeFromTop(20));
-    area.removeFromTop(gap);
-    auto cRow = area.removeFromTop(rowH);
-    clickChannelLabel_.setBounds(cRow.removeFromLeft(140));
-    clickChannelBox_.setBounds(cRow.removeFromLeft(180));
-
-    area.removeFromTop(gap);
-    auto gRow = area.removeFromTop(rowH);
-    guideChannelLabel_.setBounds(gRow.removeFromLeft(140));
-    guideChannelBox_.setBounds(gRow.removeFromLeft(180));
 
     area.removeFromTop(sectionGap);
 
@@ -284,17 +425,34 @@ void SettingsView::resized() {
     area.removeFromTop(gap);
     auto vRow1 = area.removeFromTop(rowH);
     masterVolLabel_.setBounds(vRow1.removeFromLeft(140));
-    masterVolSlider_.setBounds(vRow1.removeFromLeft(300));
+    masterVolSlider_.setBounds(vRow1.removeFromLeft(280));
 
     area.removeFromTop(gap);
     auto vRow2 = area.removeFromTop(rowH);
     clickVolLabel_.setBounds(vRow2.removeFromLeft(140));
-    clickVolSlider_.setBounds(vRow2.removeFromLeft(300));
+    clickVolSlider_.setBounds(vRow2.removeFromLeft(280));
 
     area.removeFromTop(gap);
     auto vRow3 = area.removeFromTop(rowH);
     guideVolLabel_.setBounds(vRow3.removeFromLeft(140));
-    guideVolSlider_.setBounds(vRow3.removeFromLeft(300));
+    guideVolSlider_.setBounds(vRow3.removeFromLeft(280));
+
+    // Right column: Library Backup & Restore card
+    backupCardBounds_ = rightCol.removeFromTop(std::min(230, rightCol.getHeight()));
+    auto card = backupCardBounds_.reduced(16);
+    backupSectionLabel_.setBounds(card.removeFromTop(20));
+    card.removeFromTop(8);
+    backupInfoLabel_.setBounds(card.removeFromTop(52));
+    card.removeFromTop(12);
+
+    auto btnRow = card.removeFromTop(32);
+    const int btnW = std::min(160, (btnRow.getWidth() - 10) / 2);
+    backupLibraryButton_.setBounds(btnRow.removeFromLeft(btnW));
+    btnRow.removeFromLeft(10);
+    importBackupButton_.setBounds(btnRow.removeFromLeft(btnW));
+
+    card.removeFromTop(14);
+    backupStatusLabel_.setBounds(card);
 }
 
 } // namespace tracks

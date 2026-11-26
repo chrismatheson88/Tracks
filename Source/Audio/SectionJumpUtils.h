@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Models/Song.h"
+#include "../Models/SetlistEntry.h"
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -114,6 +115,49 @@ inline bool canRepeatCurrentSection(int sectionCount, const SectionContext& ctx)
     return sectionCount > 0 && ctx.currentSectionIndex >= 0 && ctx.currentSectionIndex < sectionCount;
 }
 
+// Return the index of the first non-count section (the section that naturally begins after any leading count-in),
+// or 0 if all sections are count sections, or -1 if spans is empty.
+inline int getDefaultStartSectionIndex(const std::vector<SectionSpan>& spans) {
+    const int n = static_cast<int>(spans.size());
+    if (n == 0) return -1;
+    for (int i = 0; i < n; ++i) {
+        if (!spans[static_cast<size_t>(i)].isCount) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// Compute the updated pre-play start section index (-1 means normal start from the beginning of the song)
+// when stepping back/forward while stopped.
+inline int computeNextStartSection(const std::vector<SectionSpan>& spans,
+                                   int currentStartIndex,
+                                   int delta) {
+    const int n = static_cast<int>(spans.size());
+    if (n == 0 || delta == 0) return -1;
+
+    const int baseIdx = getDefaultStartSectionIndex(spans);
+    if (baseIdx < 0) return -1;
+
+    const int cursor = (currentStartIndex >= baseIdx && currentStartIndex < n) ? currentStartIndex : baseIdx;
+    const int next = std::clamp(cursor + delta, baseIdx, n - 1);
+    return (next == baseIdx) ? -1 : next;
+}
+
+inline bool canStepStartSection(const std::vector<SectionSpan>& spans,
+                                int currentStartIndex,
+                                int delta) {
+    const int n = static_cast<int>(spans.size());
+    if (n == 0 || delta == 0) return false;
+
+    const int baseIdx = getDefaultStartSectionIndex(spans);
+    if (baseIdx < 0) return false;
+
+    const int cursor = (currentStartIndex >= baseIdx && currentStartIndex < n) ? currentStartIndex : baseIdx;
+    const int next = std::clamp(cursor + delta, baseIdx, n - 1);
+    return next != cursor;
+}
+
 // Toggle repeating the currently playing section:
 // - If already queued to repeat currentSectionIndex, cancels and returns -1.
 // - Otherwise queues currentSectionIndex (or returns -1 if not currently inside a section).
@@ -127,6 +171,37 @@ inline int computeToggleRepeatCurrentSection(int sectionCount,
         return -1;
     }
     return ctx.currentSectionIndex;
+}
+
+struct SongTransitionTriggerPlan {
+    int64_t endBar = 0;       // Timeline bar where the current song ends
+    int64_t triggerBar = 0;   // Timeline bar where transition fires (< endBar for Crossfade 1/2 bar)
+    bool isCrossfade = false; // True when firing early with outgoing track fade-out
+};
+
+inline SongTransitionTriggerPlan computeSongTransitionPlan(int64_t prependedCountBars,
+                                                           int64_t trackBars,
+                                                           SongTransitionMode mode,
+                                                           int crossfadeBars,
+                                                           bool hasNextSong) {
+    SongTransitionTriggerPlan plan;
+    const int64_t safePrepended = std::max<int64_t>(0, prependedCountBars);
+    const int64_t safeTrackBars = std::max<int64_t>(1, trackBars);
+    plan.endBar = safePrepended + safeTrackBars;
+    plan.triggerBar = plan.endBar;
+    plan.isCrossfade = false;
+
+    if (!hasNextSong) {
+        return plan;
+    }
+
+    const int xfBars = getCrossfadeBarsForTransition(mode, crossfadeBars);
+    if (xfBars > 0 && safeTrackBars > 1) {
+        const int64_t effectiveXf = std::min<int64_t>(xfBars, safeTrackBars - 1);
+        plan.triggerBar = plan.endBar - effectiveXf;
+        plan.isCrossfade = true;
+    }
+    return plan;
 }
 
 } // namespace tracks

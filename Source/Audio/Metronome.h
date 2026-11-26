@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "../Models/Song.h"
+#include "TempoMap.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -21,6 +22,9 @@ public:
     void jumpToFrame(int64_t newFrame);
 
     void setTempo(int tempo);
+    void setTempoMap(int baseTempo, const std::vector<TempoPoint>& points);
+    void clearTempoMap();
+    bool hasTempoAutomation() const { return tempoMap_.hasTempoAutomation(); }
     void setTimeSignature(const std::string& timeSignature);
     void setSections(const std::vector<SongSection>& sections);
     void setQueuedAnnouncementOverride(int cueBar, const std::string& normalizedKey);
@@ -62,13 +66,29 @@ public:
     int64_t getMetronomeFrame() const { return metronomeFrame_; }
     int64_t getTotalCountInFrames() const { return totalCountInFrames_; }
     int64_t getFramesPerBar() const { return framesPerBarAtomic_.load(std::memory_order_relaxed); }
+    int64_t getFramesPerBarForTempo(int tempo) const;
+    int64_t getFrameForBar(double timelineBar) const { return tempoMap_.barToFrame(timelineBar); }
+    double getBarForFrame(int64_t frame) const { return tempoMap_.frameToBarDouble(frame); }
+    int getPrependedCountBars() const { return tempoMap_.getPrependedCountBars(); }
+    double getTempoScale() const { return tempoMap_.getTempoScale(); }
+    int getPlaybackTempo() const { return tempo_; }
+    double getAudioDurationBarsForOriginalFrames(int64_t originalFrames) const {
+        return originalTempoMap_.audioFrameOffsetToBarDouble(originalFrames);
+    }
+    double getOriginalAudioBarFrameOffset(double audioBarZeroIdx) const {
+        return originalTempoMap_.audioBarToFrameOffsetDouble(audioBarZeroIdx);
+    }
     double getTotalBarsElapsed() const { return totalBarsElapsed_.load(std::memory_order_relaxed); }
     bool isCompoundMeter() const { return isCompoundAtomic_.load(std::memory_order_relaxed); }
 
 private:
     double sampleRate_ = 44100.0;
+    int baseTempo_ = 120;
     int tempo_ = 120;
     std::string timeSignature_ = "4/4";
+    std::vector<TempoPoint> tempoPoints_;
+    TempoMap tempoMap_;
+    TempoMap originalTempoMap_;
     float clickGain_ = 1.0f;
     float eighthClickGain_ = 1.0f;
     float sixteenthClickGain_ = 1.0f;
@@ -105,6 +125,8 @@ private:
 
     std::atomic<double> totalBarsElapsed_{0.0};
     std::atomic<int64_t> framesPerBarAtomic_{88200};
+    std::atomic<double> sampleRateAtomic_{44100.0};
+    std::atomic<int> pulseCountPerBarAtomic_{4};
     std::atomic<bool> isCompoundAtomic_{false};
 
     juce::AudioBuffer<float> quarterClick_;

@@ -13,6 +13,35 @@ const juce::Colour AppTheme::textMuted    = juce::Colour::fromString("#FFA1A1AA"
 const juce::Colour AppTheme::dangerRed    = juce::Colour::fromString("#FFEF4444");
 const juce::Colour AppTheme::warningAmber  = juce::Colour::fromString("#FFF59E0B");
 
+const juce::Colour AppTheme::headerBg          = juce::Colour::fromString("#FF101014");
+const juce::Colour AppTheme::tabLibraryAccent  = juce::Colour::fromString("#FF3B82F6");
+const juce::Colour AppTheme::tabLiveAccent     = juce::Colour::fromString("#FF9D4EFF");
+const juce::Colour AppTheme::tabSettingsAccent = juce::Colour::fromString("#FFEC2E8C");
+const juce::Colour AppTheme::pageBgLibrary     = juce::Colour::fromString("#FF171B24");
+const juce::Colour AppTheme::pageBgLive        = juce::Colour::fromString("#FF1D1826");
+const juce::Colour AppTheme::pageBgSettings    = juce::Colour::fromString("#FF231820");
+
+void AppTheme::paintTintedPageBackground(juce::Graphics& g,
+                                         juce::Rectangle<int> bounds,
+                                         const juce::Colour& baseBg,
+                                         const juce::Colour& accent) {
+    g.setColour(baseBg);
+    g.fillRect(bounds);
+
+    const float washH = std::min(48.0f, static_cast<float>(bounds.getHeight()));
+    if (washH > 0.0f) {
+        juce::ColourGradient topWash(accent.withAlpha(0.07f),
+                                     static_cast<float>(bounds.getX()),
+                                     static_cast<float>(bounds.getY()),
+                                     accent.withAlpha(0.0f),
+                                     static_cast<float>(bounds.getX()),
+                                     static_cast<float>(bounds.getY()) + washH,
+                                     false);
+        g.setGradientFill(topWash);
+        g.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth(), static_cast<int>(washH));
+    }
+}
+
 AppTheme::AppTheme() {
     setColour(juce::ResizableWindow::backgroundColourId, bgDark);
     setColour(juce::TextButton::buttonColourId, bgPanel);

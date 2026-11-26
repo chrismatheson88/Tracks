@@ -10,6 +10,7 @@ Metronome::Metronome() {
 
 void Metronome::prepare(double sampleRate) {
     sampleRate_ = (sampleRate > 0.0) ? sampleRate : 44100.0;
+    sampleRateAtomic_.store(sampleRate_, std::memory_order_relaxed);
     updateTimingParameters();
     reset();
 }
@@ -35,19 +36,87 @@ void Metronome::jumpToFrame(int64_t newFrame) {
     }
 
     metronomeFrame_ = clampedFrame;
-    const int64_t safeBeatFrames = std::max<int64_t>(1, beatFrames_);
-    const int64_t beatIndex = metronomeFrame_ / safeBeatFrames;
-    currentBar_ = static_cast<int>(beatIndex / pulseCountPerBar_);
-    currentBeatInBar_ = static_cast<int>(beatIndex % pulseCountPerBar_);
+    const double pulse = tempoMap_.frameToPulse(metronomeFrame_);
+    const int64_t beatIndex = std::max<int64_t>(0, static_cast<int64_t>(std::floor(pulse + 1e-6)));
+    currentBar_ = static_cast<int>(beatIndex / std::max(1, pulseCountPerBar_));
+    currentBeatInBar_ = static_cast<int>(beatIndex % std::max(1, pulseCountPerBar_));
 
-    const int64_t framesPerBar = std::max<int64_t>(1, beatFrames_ * pulseCountPerBar_);
-    totalBarsElapsed_.store(static_cast<double>(metronomeFrame_) / static_cast<double>(framesPerBar),
+    totalBarsElapsed_.store(pulse / static_cast<double>(std::max(1, pulseCountPerBar_)),
                             std::memory_order_relaxed);
 }
 
 void Metronome::setTempo(int tempo) {
-    tempo_ = std::max(20, std::min(300, tempo));
+    const int clamped = std::max(20, std::min(300, tempo));
+    if (clamped == tempo_) return;
+
+    const int64_t oldFrame = metronomeFrame_;
+    const double prevBars = tempoMap_.frameToBarDouble(oldFrame);
+
+    tempo_ = clamped;
+    if (tempoPoints_.empty()) {
+        baseTempo_ = clamped;
+    }
     updateTimingParameters();
+
+    if (oldFrame > 0) {
+        const int64_t newFrame = std::max<int64_t>(0, tempoMap_.barToFrame(prevBars));
+        const int64_t delta = newFrame - oldFrame;
+        for (auto& sample : activeSamples_) {
+            sample.startFrame += delta;
+        }
+        metronomeFrame_ = newFrame;
+        const double pulse = tempoMap_.frameToPulse(metronomeFrame_);
+        const int64_t beatIndex = std::max<int64_t>(0, static_cast<int64_t>(std::floor(pulse + 1e-6)));
+        currentBar_ = static_cast<int>(beatIndex / std::max(1, pulseCountPerBar_));
+        currentBeatInBar_ = static_cast<int>(beatIndex % std::max(1, pulseCountPerBar_));
+        totalBarsElapsed_.store(pulse / static_cast<double>(std::max(1, pulseCountPerBar_)),
+                                std::memory_order_relaxed);
+    }
+}
+
+void Metronome::setTempoMap(int baseTempo, const std::vector<TempoPoint>& points) {
+    const int clampedBase = std::max(20, std::min(300, baseTempo > 0 ? baseTempo : tempo_));
+    const int64_t oldFrame = metronomeFrame_;
+    const double prevBars = tempoMap_.frameToBarDouble(oldFrame);
+
+    baseTempo_ = clampedBase;
+    tempoPoints_ = points;
+    updateTimingParameters();
+
+    if (oldFrame > 0) {
+        const int64_t newFrame = std::max<int64_t>(0, tempoMap_.barToFrame(prevBars));
+        const int64_t delta = newFrame - oldFrame;
+        for (auto& sample : activeSamples_) {
+            sample.startFrame += delta;
+        }
+        metronomeFrame_ = newFrame;
+        const double pulse = tempoMap_.frameToPulse(metronomeFrame_);
+        const int64_t beatIndex = std::max<int64_t>(0, static_cast<int64_t>(std::floor(pulse + 1e-6)));
+        currentBar_ = static_cast<int>(beatIndex / std::max(1, pulseCountPerBar_));
+        currentBeatInBar_ = static_cast<int>(beatIndex % std::max(1, pulseCountPerBar_));
+        totalBarsElapsed_.store(pulse / static_cast<double>(std::max(1, pulseCountPerBar_)),
+                                std::memory_order_relaxed);
+    }
+}
+
+void Metronome::clearTempoMap() {
+    setTempoMap(tempo_, {});
+}
+
+int64_t Metronome::getFramesPerBarForTempo(int tempo) const {
+    const int clampedTempo = std::max(20, std::min(300, tempo));
+    const double sr = sampleRateAtomic_.load(std::memory_order_relaxed);
+    const bool compound = isCompoundAtomic_.load(std::memory_order_relaxed);
+    const int pulses = std::max(1, pulseCountPerBarAtomic_.load(std::memory_order_relaxed));
+
+    int64_t bf = 1;
+    if (compound) {
+        double groupFrames = sr * 60.0 / static_cast<double>(clampedTempo);
+        bf = std::max<int64_t>(1, static_cast<int64_t>(std::round(groupFrames / 3.0)));
+    } else {
+        bf = std::max<int64_t>(1, static_cast<int64_t>(std::round(sr * 60.0 / static_cast<double>(clampedTempo))));
+    }
+    return std::max<int64_t>(1, bf * pulses);
 }
 
 void Metronome::setTimeSignature(const std::string& timeSignature) {
@@ -267,38 +336,36 @@ void Metronome::loadVoiceWord(const std::string& word, const juce::AudioBuffer<f
 }
 
 void Metronome::updateTimingParameters() {
-    int bpb = 4;
-    int div = 4;
-    auto slashPos = timeSignature_.find('/');
-    if (slashPos != std::string::npos) {
-        try {
-            bpb = std::stoi(timeSignature_.substr(0, slashPos));
-            div = std::stoi(timeSignature_.substr(slashPos + 1));
-        } catch (...) {
-            bpb = 4;
-            div = 4;
-        }
-    }
-    beatsPerBar_ = std::max(1, bpb);
-    beatDivision_ = std::max(1, div);
-
-    isCompound_ = (beatDivision_ == 8 && (beatsPerBar_ == 6 || beatsPerBar_ == 12));
+    TempoMap::parseTimeSignature(timeSignature_, beatsPerBar_, beatDivision_, isCompound_, pulseCountPerBar_);
     isCompoundAtomic_.store(isCompound_, std::memory_order_relaxed);
     if (isCompound_) {
         // For compound time, tempo defines each set of 3 eighth notes
         double groupFrames = sampleRate_ * 60.0 / std::max(1, tempo_);
         beatFrames_ = std::max<int64_t>(1, static_cast<int64_t>(std::round(groupFrames / 3.0)));
-        pulseCountPerBar_ = (beatsPerBar_ / 3) * 3;
     } else {
         beatFrames_ = std::max<int64_t>(1, static_cast<int64_t>(std::round(sampleRate_ * 60.0 / std::max(1, tempo_))));
-        pulseCountPerBar_ = beatsPerBar_;
     }
+    pulseCountPerBarAtomic_.store(pulseCountPerBar_, std::memory_order_relaxed);
+    sampleRateAtomic_.store(sampleRate_, std::memory_order_relaxed);
 
-    int initialCountBars = (useSectionCountIn_ && leadingCountBars_ > 0) ? leadingCountBars_ : 2;
-    totalCountInFrames_ = beatFrames_ * pulseCountPerBar_ * initialCountBars;
+    const bool hasLeadingCount = (useSectionCountIn_ && leadingCountBars_ > 0);
+    const int prependedCountBars = hasLeadingCount ? 0 : 2;
+    const int initialCountBars = hasLeadingCount ? leadingCountBars_ : 2;
+
+    const double effectiveBase = tempoPoints_.empty()
+                                     ? static_cast<double>(std::max(1, tempo_))
+                                     : static_cast<double>(std::max(1, baseTempo_));
+    const double scale = tempoPoints_.empty()
+                             ? 1.0
+                             : (static_cast<double>(std::max(1, tempo_)) / effectiveBase);
+
+    tempoMap_.rebuild(sampleRate_, effectiveBase, scale, timeSignature_, prependedCountBars, tempoPoints_);
+    originalTempoMap_.rebuild(sampleRate_, effectiveBase, 1.0, timeSignature_, prependedCountBars, tempoPoints_);
+
+    totalCountInFrames_ = tempoMap_.barToFrame(static_cast<double>(initialCountBars));
     int64_t framesPerBar = std::max<int64_t>(1, beatFrames_ * pulseCountPerBar_);
     framesPerBarAtomic_.store(framesPerBar, std::memory_order_relaxed);
-    totalBarsElapsed_.store(static_cast<double>(metronomeFrame_) / static_cast<double>(framesPerBar), std::memory_order_relaxed);
+    totalBarsElapsed_.store(tempoMap_.frameToBarDouble(metronomeFrame_), std::memory_order_relaxed);
 }
 
 void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSample, int numSamples) {
@@ -306,9 +373,9 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSam
     int64_t blockStart = metronomeFrame_;
     int64_t blockEnd = blockStart + numSamples;
 
-    // Trigger pulses and subdivisions that fall within this block
-    int64_t firstBeatIndex = std::max<int64_t>(0, blockStart / beatFrames_);
-    int64_t lastBeatIndex = (blockEnd + beatFrames_ - 1) / beatFrames_ + 1;
+    // Trigger pulses and subdivisions that fall within this block using the TempoMap
+    int64_t firstBeatIndex = std::max<int64_t>(0, static_cast<int64_t>(std::floor(tempoMap_.frameToPulse(blockStart))) - 1);
+    int64_t lastBeatIndex = static_cast<int64_t>(std::ceil(tempoMap_.frameToPulse(blockEnd))) + 1;
     const int effClickCh = (numOutputChannels > 0) ? std::clamp(clickChannel_, 0, numOutputChannels - 1) : 0;
     const int effGuideCh = (numOutputChannels > 0) ? std::clamp(guideChannel_, 0, numOutputChannels - 1) : 0;
 
@@ -320,7 +387,7 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSam
     };
 
     for (int64_t beatIndex = firstBeatIndex; beatIndex <= lastBeatIndex; ++beatIndex) {
-        int64_t beatStart = beatIndex * beatFrames_;
+        int64_t beatStart = tempoMap_.pulseToFrame(static_cast<double>(beatIndex));
         int beatInBar = static_cast<int>(beatIndex % pulseCountPerBar_);
 
         if (beatStart >= blockStart && beatStart < blockEnd) {
@@ -382,9 +449,9 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSam
         // Eighth & sixteenth click subdivisions inside this beat
         if (numOutputChannels > 0 && (enableEighths_ || enableSixteenths_)) {
             if (isCompound_) {
-                // Compound meter (6/8, 12/8): beatFrames_ is 1 eighth note; split in half for sixteenths
+                // Compound meter (6/8, 12/8): 1 pulse is 1 eighth note; split in half for sixteenths
                 if (enableSixteenths_) {
-                    int64_t subPos = beatStart + beatFrames_ / 2;
+                    int64_t subPos = tempoMap_.pulseToFrame(static_cast<double>(beatIndex) + 0.5);
                     if (subPos >= blockStart && subPos < blockEnd) {
                         const auto& buf = resolveSixteenthBuf();
                         if (buf.getNumSamples() > 0) {
@@ -393,9 +460,9 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSam
                     }
                 }
             } else {
-                // Simple meter: beatFrames_ is 1 quarter note -> 4 sixteenth steps (1 = e, 2 = &, 3 = a)
+                // Simple meter: 1 pulse is 1 quarter note -> 4 sixteenth steps (1 = e, 2 = &, 3 = a)
                 for (int sub = 1; sub <= 3; ++sub) {
-                    int64_t subPos = beatStart + (beatFrames_ * sub) / 4;
+                    int64_t subPos = tempoMap_.pulseToFrame(static_cast<double>(beatIndex) + static_cast<double>(sub) * 0.25);
                     if (subPos < blockStart || subPos >= blockEnd)
                         continue;
 
@@ -454,8 +521,7 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSam
     activeSamples_ = std::move(stillActive);
 
     metronomeFrame_ = blockEnd;
-    int64_t framesPerBar = std::max<int64_t>(1, beatFrames_ * pulseCountPerBar_);
-    totalBarsElapsed_.store(static_cast<double>(metronomeFrame_) / static_cast<double>(framesPerBar), std::memory_order_relaxed);
+    totalBarsElapsed_.store(tempoMap_.frameToBarDouble(metronomeFrame_), std::memory_order_relaxed);
 }
 
 } // namespace tracks

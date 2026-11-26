@@ -32,6 +32,8 @@ ENV/
 
 # Local uploaded and generated audio/assets
 uploaded_tracks/
+Backup/
+Tracks_Backup_*.zip
 
 # C++ / CMake
 build/

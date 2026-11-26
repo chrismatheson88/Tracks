@@ -21,6 +21,10 @@ public:
     DatabaseService& operator=(const DatabaseService&) = delete;
 
     void ensureSchema();
+    const std::string& getDbPath() const { return dbPath_; }
+    void exportSnapshotToFile(const std::string& destPath);
+    void replaceDatabaseFromFile(const std::string& srcPath);
+    void remapTrackPathsToStorageRoot(const std::string& uploadedTracksRoot);
 
     // Songs
     Song saveSong(Song song);

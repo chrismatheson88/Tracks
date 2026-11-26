@@ -247,10 +247,9 @@ AudioDirectoryInspectionResult AudioAttachmentService::inspectAudioDirectory(con
 
     if (roundedDurations.size() > 1) {
         std::ostringstream oss;
-        oss << "Audio lengths differ — ";
-        for (size_t i = 0; i < details.size(); ++i) {
-            if (i > 0) oss << ", ";
-            oss << details[i].name << ": " << std::fixed << std::setprecision(3) << details[i].duration << "s";
+        oss << "Audio lengths differ:";
+        for (const auto& d : details) {
+            oss << "\n  - " << d.name << ": " << std::fixed << std::setprecision(3) << d.duration << "s";
         }
         result.mismatches.insert(result.mismatches.begin(), oss.str());
     }

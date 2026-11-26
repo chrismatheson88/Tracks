@@ -5,6 +5,125 @@
 
 namespace tracks {
 
+namespace {
+
+juce::Path makeTopRoundedTabPath(juce::Rectangle<float> r, float cornerRadius, bool closeBottom) {
+    juce::Path p;
+    const float rad = std::min({ cornerRadius, r.getWidth() * 0.5f, r.getHeight() * 0.5f });
+    p.startNewSubPath(r.getX(), r.getBottom());
+    p.lineTo(r.getX(), r.getY() + rad);
+    p.addCentredArc(r.getX() + rad, r.getY() + rad, rad, rad, 0.0f,
+                    -juce::MathConstants<float>::halfPi, 0.0f, false);
+    p.lineTo(r.getRight() - rad, r.getY());
+    p.addCentredArc(r.getRight() - rad, r.getY() + rad, rad, rad, 0.0f,
+                    0.0f, juce::MathConstants<float>::halfPi, false);
+    p.lineTo(r.getRight(), r.getBottom());
+    if (closeBottom) {
+        p.closeSubPath();
+    }
+    return p;
+}
+
+} // namespace
+
+class MainComponent::NavTabButton : public juce::Button {
+public:
+    NavTabButton(const juce::String& label, juce::Colour accent, juce::Colour pageBg)
+        : juce::Button(label), accent_(accent), pageBg_(pageBg) {
+        setMouseCursor(juce::MouseCursor::PointingHandCursor);
+        setWantsKeyboardFocus(false);
+    }
+
+    void setActive(bool active) {
+        if (active_ != active) {
+            active_ = active;
+            repaint();
+        }
+    }
+
+    bool isActive() const { return active_; }
+    juce::Colour getAccentColour() const { return accent_; }
+    juce::Colour getPageBackgroundColour() const { return pageBg_; }
+
+    void paintButton(juce::Graphics& g, bool highlighted, bool down) override {
+        const float w = static_cast<float>(getWidth());
+        const float h = static_cast<float>(getHeight());
+        if (w <= 2.0f || h <= 2.0f) return;
+
+        if (active_) {
+            juce::Rectangle<float> r(0.5f, 0.5f, w - 1.0f, h - 0.5f);
+            auto fillPath = makeTopRoundedTabPath(r, 7.0f, true);
+            auto strokePath = makeTopRoundedTabPath(r, 7.0f, false);
+
+            // Base page background so the active tab merges seamlessly into the page below
+            g.setColour(pageBg_);
+            g.fillPath(fillPath);
+
+            // Subtle top-down accent wash ending at 0.07f to match the page's top glow seamlessly
+            juce::ColourGradient tabWash(accent_.withAlpha(0.18f), 0.0f, r.getY(),
+                                         accent_.withAlpha(0.07f), 0.0f, r.getBottom(), false);
+            g.setGradientFill(tabWash);
+            g.fillPath(fillPath);
+
+            // Crisp top accent bar clipped to the tab's rounded top corners
+            {
+                juce::Graphics::ScopedSaveState state(g);
+                g.reduceClipRegion(fillPath);
+                g.setColour(accent_);
+                g.fillRect(r.getX(), r.getY(), r.getWidth(), 3.0f);
+            }
+
+            // Open-bottom border around left, top, and right edges
+            g.setColour(AppTheme::borderCol.interpolatedWith(accent_, 0.45f));
+            g.strokePath(strokePath, juce::PathStrokeType(1.0f));
+
+            // Label
+            g.setFont(juce::Font(13.0f, juce::Font::bold));
+            g.setColour(AppTheme::textLight);
+            g.drawText(getButtonText(),
+                       r.withTrimmedTop(3.0f).toNearestInt(),
+                       juce::Justification::centred,
+                       false);
+        } else {
+            juce::Rectangle<float> r(0.5f, 5.5f, w - 1.0f, h - 6.5f);
+            auto fillPath = makeTopRoundedTabPath(r, 6.0f, true);
+            auto strokePath = makeTopRoundedTabPath(r, 6.0f, false);
+
+            juce::Colour bg = AppTheme::headerBg.brighter(0.06f);
+            if (down) {
+                bg = pageBg_.darker(0.08f);
+            } else if (highlighted) {
+                bg = bg.interpolatedWith(pageBg_, 0.65f).interpolatedWith(accent_, 0.08f);
+            }
+            g.setColour(bg);
+            g.fillPath(fillPath);
+
+            // Subtle top accent hairline so each tab's logo hue is gently visible even when inactive
+            {
+                juce::Graphics::ScopedSaveState state(g);
+                g.reduceClipRegion(fillPath);
+                g.setColour(accent_.withAlpha(highlighted ? 0.78f : 0.36f));
+                g.fillRect(r.getX(), r.getY(), r.getWidth(), 2.0f);
+            }
+
+            g.setColour(AppTheme::borderCol.withAlpha(highlighted ? 0.80f : 0.42f));
+            g.strokePath(strokePath, juce::PathStrokeType(1.0f));
+
+            g.setFont(juce::Font(12.5f, juce::Font::bold));
+            g.setColour(highlighted ? AppTheme::textLight : AppTheme::textMuted);
+            g.drawText(getButtonText(),
+                       r.withTrimmedTop(2.0f).toNearestInt(),
+                       juce::Justification::centred,
+                       false);
+        }
+    }
+
+private:
+    juce::Colour accent_;
+    juce::Colour pageBg_;
+    bool active_ = false;
+};
+
 MainComponent::MainComponent() {
     juce::LookAndFeel::setDefaultLookAndFeel(&theme_);
     setOpaque(true);
@@ -15,6 +134,11 @@ MainComponent::MainComponent() {
 
     // Audio Engine
     audioEngine_ = std::make_unique<AudioEngine>();
+    audioEngine_->onSongTransitionTriggered = [this](AudioEngine::TransitionTrigger trigger) {
+        if (activeView_ == ActiveView::OpenSet && openSetView_) {
+            openSetView_->executeSongTransition(trigger);
+        }
+    };
 
     // Brand Logo & Label
     brandIcon_ = juce::ImageCache::getFromMemory(BinaryData::TracksLogo_png, BinaryData::TracksLogo_pngSize);
@@ -22,15 +146,20 @@ MainComponent::MainComponent() {
     brandLabel_.setColour(juce::Label::textColourId, AppTheme::primaryBlue);
     addAndMakeVisible(brandLabel_);
 
-    // Navigation buttons
-    auto setupNavBtn = [this](juce::TextButton& btn, ActiveView view) {
-        btn.onClick = [this, view]() { switchView(view); };
-        addAndMakeVisible(btn);
+    // Navigation tabs (Blue / Purple / Pink from Tracks logo)
+    auto setupNavTab = [this](std::unique_ptr<NavTabButton>& btn,
+                              const juce::String& label,
+                              juce::Colour accent,
+                              juce::Colour pageBg,
+                              ActiveView view) {
+        btn = std::make_unique<NavTabButton>(label, accent, pageBg);
+        btn->onClick = [this, view]() { switchView(view); };
+        addAndMakeVisible(btn.get());
     };
 
-    setupNavBtn(navLibraryButton_, ActiveView::Library);
-    setupNavBtn(navOpenSetButton_, ActiveView::OpenSet);
-    setupNavBtn(navSettingsButton_, ActiveView::Settings);
+    setupNavTab(navLibraryButton_, "Library", AppTheme::tabLibraryAccent, AppTheme::pageBgLibrary, ActiveView::Library);
+    setupNavTab(navOpenSetButton_, "Live", AppTheme::tabLiveAccent, AppTheme::pageBgLive, ActiveView::OpenSet);
+    setupNavTab(navSettingsButton_, "Settings", AppTheme::tabSettingsAccent, AppTheme::pageBgSettings, ActiveView::Settings);
 
     relaunchButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
     relaunchButton_.onClick = [this]() { relaunchApp(); };
@@ -55,6 +184,20 @@ MainComponent::MainComponent() {
     addChildComponent(openSetView_.get());
 
     settingsView_ = std::make_unique<SettingsView>(*db_, *audioEngine_);
+    settingsView_->onLibraryImported = [this]() {
+        if (libraryView_) libraryView_->reloadAfterImport();
+        if (openSetView_) openSetView_->refreshSetlists();
+        if (settingsView_) settingsView_->refreshSettings();
+        if (transport_) {
+            transport_->setSongInfo("", "", 120, "C", "4/4");
+            transport_->syncTracksAvailability(std::nullopt, {}, false, {});
+            transport_->syncArrangements({}, std::nullopt, 120, "C", "4/4", false, false, 1.0f, 1.0f);
+            transport_->syncClickAndGuideChannels(audioEngine_->getClickChannel(), audioEngine_->getGuideChannel());
+            if (openSetView_) {
+                transport_->setSongNavigationState(openSetView_->canSelectPreviousSong(), openSetView_->canSelectNextSong());
+            }
+        }
+    };
     addChildComponent(settingsView_.get());
 
     // Initialize transport bar
@@ -77,6 +220,11 @@ MainComponent::MainComponent() {
     };
     transport_->onNextSongClicked = [this]() {
         if (openSetView_) openSetView_->selectNextSong();
+    };
+    transport_->onTransitionChanged = [this](SongTransitionMode mode, int crossfadeBars) {
+        if (activeView_ == ActiveView::OpenSet && openSetView_) {
+            openSetView_->setCurrentSongTransition(mode, crossfadeBars);
+        }
     };
     transport_->onMasterGainChanged = [this](float g) {
         audioEngine_->setMasterGain(g);
@@ -173,9 +321,22 @@ void MainComponent::playSong(const Song& song) {
                                  clickOnly16,
                                  clickOnly8Gain,
                                  clickOnly16Gain);
+
+    if (activeView_ == ActiveView::OpenSet && openSetView_) {
+        const auto mode = openSetView_->getCurrentSongTransitionMode();
+        const int xfBars = openSetView_->getCurrentSongCrossfadeBars();
+        transport_->setTransitionConfig(mode, xfBars);
+        audioEngine_->setTransitionConfig(mode, xfBars, openSetView_->canSelectNextSong());
+    } else {
+        transport_->setTransitionConfig(SongTransitionMode::StayInCurrentSong, 1);
+        audioEngine_->setTransitionConfig(SongTransitionMode::StayInCurrentSong, 1, false);
+    }
 }
 
 void MainComponent::switchView(ActiveView view) {
+    if (activeView_ == ActiveView::Library && view != ActiveView::Library && libraryView_) {
+        libraryView_->flushPendingAutoSave();
+    }
     activeView_ = view;
 
     libraryView_->setVisible(activeView_ == ActiveView::Library);
@@ -184,10 +345,15 @@ void MainComponent::switchView(ActiveView view) {
 
     if (activeView_ == ActiveView::Library) {
         libraryView_->refreshSongList();
+        audioEngine_->setTransitionConfig(SongTransitionMode::StayInCurrentSong, 1, false);
     } else if (activeView_ == ActiveView::OpenSet) {
         transport_->syncClickAndGuideChannels(audioEngine_->getClickChannel(), audioEngine_->getGuideChannel());
         openSetView_->refreshSetlists();
         transport_->setSongNavigationState(openSetView_->canSelectPreviousSong(), openSetView_->canSelectNextSong());
+        const auto mode = openSetView_->getCurrentSongTransitionMode();
+        const int xfBars = openSetView_->getCurrentSongCrossfadeBars();
+        transport_->setTransitionConfig(mode, xfBars);
+        audioEngine_->setTransitionConfig(mode, xfBars, openSetView_->canSelectNextSong());
     } else if (activeView_ == ActiveView::Settings) {
         settingsView_->refreshSettings();
     }
@@ -196,36 +362,57 @@ void MainComponent::switchView(ActiveView view) {
     resized();
 }
 
-void MainComponent::updateNavButtonStyles() {
-    auto setBtnActive = [](juce::TextButton& btn, bool active) {
-        btn.setColour(juce::TextButton::buttonColourId,
-                      active ? AppTheme::primaryBlue : AppTheme::bgPanel);
-    };
+MainComponent::~MainComponent() = default;
 
-    setBtnActive(navLibraryButton_, activeView_ == ActiveView::Library);
-    setBtnActive(navOpenSetButton_, activeView_ == ActiveView::OpenSet);
-    setBtnActive(navSettingsButton_, activeView_ == ActiveView::Settings);
+void MainComponent::updateNavButtonStyles() {
+    if (navLibraryButton_) navLibraryButton_->setActive(activeView_ == ActiveView::Library);
+    if (navOpenSetButton_) navOpenSetButton_->setActive(activeView_ == ActiveView::OpenSet);
+    if (navSettingsButton_) navSettingsButton_->setActive(activeView_ == ActiveView::Settings);
+    repaint();
 }
 
 void MainComponent::paint(juce::Graphics& g) {
-    g.fillAll(AppTheme::bgDark);
+    const NavTabButton* activeTab = navLibraryButton_.get();
+    if (activeView_ == ActiveView::OpenSet) activeTab = navOpenSetButton_.get();
+    else if (activeView_ == ActiveView::Settings) activeTab = navSettingsButton_.get();
+
+    const juce::Colour activePageBg = activeTab ? activeTab->getPageBackgroundColour() : AppTheme::bgDark;
+    const juce::Colour activeAccent = activeTab ? activeTab->getAccentColour() : AppTheme::primaryBlue;
+
+    // Fill page region with active page color and top header strip with recessed dark tone
+    g.fillAll(activePageBg);
+    g.setColour(AppTheme::headerBg);
+    g.fillRect(0, 0, getWidth(), 60);
 
     if (brandIcon_.isValid() && !brandIconBounds_.isEmpty()) {
         g.setImageResamplingQuality(juce::Graphics::highResamplingQuality);
         g.drawImage(brandIcon_, brandIconBounds_.toFloat(), juce::RectanglePlacement::centred);
     }
 
-    // Divider line below top nav bar
-    g.setColour(AppTheme::borderCol);
-    g.drawHorizontalLine(60, 0.0f, static_cast<float>(getWidth()));
+    // Horizontal seam below header bar, broken under the active tab so the tab attaches seamlessly to the page
+    g.setColour(AppTheme::borderCol.interpolatedWith(activeAccent, 0.45f));
+    const float seamY = 59.5f;
+    if (activeTab && !activeTab->getBounds().isEmpty()) {
+        const float tabLeft = static_cast<float>(activeTab->getX()) + 0.5f;
+        const float tabRight = static_cast<float>(activeTab->getRight()) - 0.5f;
+        if (tabLeft > 0.0f) {
+            g.drawLine(0.0f, seamY, tabLeft, seamY, 1.0f);
+        }
+        if (tabRight < static_cast<float>(getWidth())) {
+            g.drawLine(tabRight, seamY, static_cast<float>(getWidth()), seamY, 1.0f);
+        }
+    } else {
+        g.drawLine(0.0f, seamY, static_cast<float>(getWidth()), seamY, 1.0f);
+    }
 }
 
 void MainComponent::resized() {
     auto area = getLocalBounds();
 
-    // Top Navigation Bar (height 60 to accommodate large borderless brand logo cleanly)
-    auto topBar = area.removeFromTop(60).reduced(12, 4);
-    auto navHeight = [&topBar](juce::Rectangle<int> slot) {
+    // Top Navigation Bar (height 60 to accommodate large borderless brand logo & attached tabs cleanly)
+    auto headerArea = area.removeFromTop(60);
+    auto topBar = headerArea.reduced(12, 4);
+    auto navHeight = [](juce::Rectangle<int> slot) {
         return slot.withSizeKeepingCentre(slot.getWidth(), 32);
     };
 
@@ -237,11 +424,24 @@ void MainComponent::resized() {
     brandLabel_.setBounds(navHeight(topBar.removeFromLeft(90)));
     topBar.removeFromLeft(16);
 
-    navLibraryButton_.setBounds(navHeight(topBar.removeFromLeft(100)));
-    topBar.removeFromLeft(8);
-    navOpenSetButton_.setBounds(navHeight(topBar.removeFromLeft(110)));
-    topBar.removeFromLeft(8);
-    navSettingsButton_.setBounds(navHeight(topBar.removeFromLeft(100)));
+    // Attached tabs sit flush against the bottom of the 60px header bar
+    const int tabH = 42;
+    const int tabY = headerArea.getBottom() - tabH;
+    const int tabW = 108;
+    const int tabGap = 4;
+    int tabX = topBar.getX();
+
+    if (navLibraryButton_) {
+        navLibraryButton_->setBounds(tabX, tabY, tabW, tabH);
+        tabX += tabW + tabGap;
+    }
+    if (navOpenSetButton_) {
+        navOpenSetButton_->setBounds(tabX, tabY, tabW, tabH);
+        tabX += tabW + tabGap;
+    }
+    if (navSettingsButton_) {
+        navSettingsButton_->setBounds(tabX, tabY, tabW, tabH);
+    }
 
     if (activeView_ == ActiveView::OpenSet) {
         openSetView_->setBounds(area);

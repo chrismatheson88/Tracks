@@ -11,7 +11,7 @@ namespace tracks {
 class OpenSetView : public juce::Component, public juce::ListBoxModel {
 public:
     OpenSetView(DatabaseService& db, AudioEngine& audioEngine);
-    ~OpenSetView() override = default;
+    ~OpenSetView() override;
 
     void refreshSetlists();
     void selectSetlist(int64_t setId);
@@ -19,6 +19,10 @@ public:
     void selectNextSong();
     bool canSelectPreviousSong() const;
     bool canSelectNextSong() const;
+    SongTransitionMode getCurrentSongTransitionMode() const;
+    int getCurrentSongCrossfadeBars() const;
+    void setCurrentSongTransition(SongTransitionMode mode, int crossfadeBars);
+    void executeSongTransition(AudioEngine::TransitionTrigger trigger);
     void selectArrangementForCurrentSong(int64_t arrangementId);
     void applySongParameters(int tempo, const std::string& key, const std::string& timeSignature);
     void syncSongClickSubdivisions(int64_t songId,
@@ -39,9 +43,22 @@ public:
 
     void resized() override;
     void paint(juce::Graphics& g) override;
+    void mouseDown(const juce::MouseEvent& e) override;
     juce::Rectangle<int> getTransportArea() const { return transportArea_; }
 
 private:
+    struct LibrarySongChoice {
+        int64_t songId = 0;
+        std::string title;
+        std::string artist;
+        std::string displayLabel;
+    };
+
+    class SongFilterEditor;
+    class SongDropdownToggle;
+    class SongDropdownOverlay;
+    class SetlistPickerLookAndFeel;
+
     DatabaseService& db_;
     AudioEngine& audioEngine_;
 
@@ -51,6 +68,7 @@ private:
 
     // Top set selection, date, and time
     juce::Label setSelectLabel_{{}, "Setlist:"};
+    std::unique_ptr<SetlistPickerLookAndFeel> setPickerLookAndFeel_;
     juce::ComboBox setPicker_;
     juce::Label dateLabel_{{}, "Date:"};
     juce::TextEditor dateEditor_;
@@ -67,15 +85,26 @@ private:
     juce::TextButton moveDownButton_{"Move Down"};
     juce::TextButton removeSongButton_{"Remove"};
 
-    juce::ComboBox addSongPicker_;
+    std::vector<LibrarySongChoice> librarySongChoices_;
+    std::unique_ptr<SongFilterEditor> addSongFilterEditor_;
+    std::unique_ptr<SongDropdownToggle> addSongDropdownButton_;
+    std::unique_ptr<SongDropdownOverlay> addSongDropdownOverlay_;
+    juce::Rectangle<int> addSongBarBounds_;
     juce::Rectangle<int> transportArea_;
+    int setHeaderBottomY_ = 0;
 
     void loadSetlistToUI(const Setlist& setlist, bool preserveSelection = false);
     Song buildEffectiveSongForEntry(const SetlistEntry& entry) const;
     void preloadCurrentSetlist();
     void saveCurrentSetlist();
+    void populateSetPickerItems();
     void notifySongNavigationState();
     void populateAddSongPicker();
+    void openAddSongDropdown();
+    void hideAddSongDropdown();
+    void positionAddSongDropdown();
+    void updateFilteredAddSongList();
+    void addSongToCurrentSet(int64_t songId);
     void showCalendarPopup();
     void showTimePopup();
 };

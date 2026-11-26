@@ -46,6 +46,17 @@ struct SongSection {
     }
 };
 
+struct TempoPoint {
+    std::optional<int64_t> id;
+    int bar = 1;            // 1-indexed musical bar in the arrangement's audio timeline
+    double beat = 1.0;      // 1-indexed beat/pulse within the bar (1.0 .. beatsPerBar)
+    double bpm = 120.0;     // Target BPM (20.0 .. 300.0)
+    double rampBars = 0.0;  // 0.0 = instant Step at (bar, beat); > 0 = linear ramp starting at (bar, beat) over rampBars bars
+    int orderIndex = 0;
+
+    bool isRamp() const { return rampBars > 1e-4; }
+};
+
 struct SongArrangement {
     std::optional<int64_t> id;
     std::string name = "Main";
@@ -58,6 +69,7 @@ struct SongArrangement {
     float clickSixteenthsGain = 1.0f;
     std::vector<SongTrack> tracks;
     std::vector<SongSection> sections;
+    std::vector<TempoPoint> tempoPoints;
 
     std::string toDisplayLabel() const {
         std::ostringstream oss;
@@ -82,6 +94,7 @@ struct Song {
     float clickSixteenthsGain = 1.0f;
     std::vector<SongTrack> tracks;
     std::vector<SongSection> sections;
+    std::vector<TempoPoint> tempoPoints;
     std::vector<SongArrangement> arrangements;
     std::optional<int64_t> activeArrangementId; // Runtime selection for playback & caching
 
@@ -122,7 +135,7 @@ struct Song {
 
     std::string toSummary() const {
         std::ostringstream oss;
-        oss << title << " — " << artist << " (" << tempo << " BPM, " << key << ", " << timeSignature << ")";
+        oss << title << " - " << artist << " (" << tempo << " BPM, " << key << ", " << timeSignature << ")";
         return oss.str();
     }
 };

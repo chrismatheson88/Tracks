@@ -1,5 +1,6 @@
 #include "DatabaseService.h"
 #include <sqlite3.h>
+#include <filesystem>
 #include <set>
 #include <stdexcept>
 #include <iostream>
@@ -41,6 +42,177 @@ void DatabaseService::close() {
     if (db_ != nullptr) {
         sqlite3_close(db_);
         db_ = nullptr;
+    }
+}
+
+void DatabaseService::exportSnapshotToFile(const std::string& destPath) {
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    if (!db_) {
+        throw std::runtime_error("Database connection is not open.");
+    }
+
+    std::error_code ec;
+    std::filesystem::path dst(destPath);
+    if (dst.has_parent_path()) {
+        std::filesystem::create_directories(dst.parent_path(), ec);
+    }
+    std::filesystem::remove(dst, ec);
+
+    sqlite3* destDb = nullptr;
+    int rc = sqlite3_open(destPath.c_str(), &destDb);
+    if (rc != SQLITE_OK || !destDb) {
+        std::string err = destDb ? sqlite3_errmsg(destDb) : "Unable to open destination database";
+        if (destDb) sqlite3_close(destDb);
+        throw std::runtime_error("Failed to create snapshot database: " + err);
+    }
+
+    sqlite3_backup* backup = sqlite3_backup_init(destDb, "main", db_, "main");
+    if (!backup) {
+        std::string err = sqlite3_errmsg(destDb);
+        sqlite3_close(destDb);
+        throw std::runtime_error("Failed to initialize SQLite backup: " + err);
+    }
+
+    rc = sqlite3_backup_step(backup, -1);
+    int finishRc = sqlite3_backup_finish(backup);
+    sqlite3_close(destDb);
+
+    if (rc != SQLITE_DONE || finishRc != SQLITE_OK) {
+        std::filesystem::remove(dst, ec);
+        throw std::runtime_error("SQLite backup failed with error code " + std::to_string(rc));
+    }
+}
+
+void DatabaseService::replaceDatabaseFromFile(const std::string& srcPath) {
+    namespace fs = std::filesystem;
+    {
+        std::lock_guard<std::mutex> lock(dbMutex_);
+        if (!fs::exists(srcPath) || !fs::is_regular_file(srcPath)) {
+            throw std::runtime_error("Import database file does not exist.");
+        }
+
+        // Validate source file is a readable SQLite database before touching current DB
+        sqlite3* testDb = nullptr;
+        int testRc = sqlite3_open_v2(srcPath.c_str(), &testDb, SQLITE_OPEN_READONLY, nullptr);
+        bool validSchema = false;
+        if (testRc == SQLITE_OK && testDb) {
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(testDb,
+                                   "SELECT name FROM sqlite_master WHERE type='table' AND name='songs';",
+                                   -1, &stmt, nullptr) == SQLITE_OK) {
+                validSchema = (sqlite3_step(stmt) == SQLITE_ROW);
+                sqlite3_finalize(stmt);
+            }
+        }
+        if (testDb) sqlite3_close(testDb);
+        if (!validSchema) {
+            throw std::runtime_error("Backup archive does not contain a valid Tracks library database.");
+        }
+
+        close();
+
+        fs::path targetPath(dbPath_);
+        fs::path rollbackPath(dbPath_ + ".pre_import_bak");
+        std::error_code ec;
+
+        // Clean any SQLite sidecar journal/WAL files
+        fs::remove(dbPath_ + "-wal", ec);
+        fs::remove(dbPath_ + "-shm", ec);
+        fs::remove(dbPath_ + "-journal", ec);
+
+        bool hadOriginal = fs::exists(targetPath, ec);
+        if (hadOriginal) {
+            fs::remove(rollbackPath, ec);
+            fs::copy_file(targetPath, rollbackPath, fs::copy_options::overwrite_existing, ec);
+        }
+
+        try {
+            fs::copy_file(srcPath, targetPath, fs::copy_options::overwrite_existing);
+            int rc = sqlite3_open(dbPath_.c_str(), &db_);
+            if (rc != SQLITE_OK || !db_) {
+                throw std::runtime_error("Failed to open restored SQLite database.");
+            }
+            executeSimple("PRAGMA foreign_keys = ON;");
+            if (hadOriginal) {
+                fs::remove(rollbackPath, ec);
+            }
+        } catch (...) {
+            close();
+            if (hadOriginal && fs::exists(rollbackPath, ec)) {
+                fs::copy_file(rollbackPath, targetPath, fs::copy_options::overwrite_existing, ec);
+                fs::remove(rollbackPath, ec);
+            }
+            sqlite3_open(dbPath_.c_str(), &db_);
+            if (db_) {
+                char* errMsg = nullptr;
+                sqlite3_exec(db_, "PRAGMA foreign_keys = ON;", nullptr, nullptr, &errMsg);
+                if (errMsg) sqlite3_free(errMsg);
+            }
+            throw;
+        }
+    }
+
+    // Run migrations cleanly on the restored database
+    ensureSchema();
+}
+
+void DatabaseService::remapTrackPathsToStorageRoot(const std::string& uploadedTracksRoot) {
+    namespace fs = std::filesystem;
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    if (!db_ || uploadedTracksRoot.empty()) return;
+
+    fs::path rootPath = fs::absolute(fs::path(uploadedTracksRoot));
+
+    std::vector<std::pair<int64_t, std::string>> updates;
+    sqlite3_stmt* selStmt = nullptr;
+    if (sqlite3_prepare_v2(db_, "SELECT id, file_path FROM tracks;", -1, &selStmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(selStmt) == SQLITE_ROW) {
+            int64_t id = sqlite3_column_int64(selStmt, 0);
+            const unsigned char* txt = sqlite3_column_text(selStmt, 1);
+            if (!txt) continue;
+            std::string oldPath(reinterpret_cast<const char*>(txt));
+            if (oldPath.empty()) continue;
+
+            // Normalize slashes to find "uploaded_tracks/" marker for cross-machine portability
+            std::string normalized = oldPath;
+            for (char& ch : normalized) {
+                if (ch == '\\') ch = '/';
+            }
+            const std::string marker = "uploaded_tracks/";
+            size_t pos = normalized.rfind(marker);
+            if (pos != std::string::npos) {
+                std::string rel = normalized.substr(pos + marker.size());
+                if (!rel.empty()) {
+                    fs::path mapped = rootPath / fs::path(rel);
+                    std::string mappedStr = mapped.string();
+                    if (mappedStr != oldPath) {
+                        updates.emplace_back(id, std::move(mappedStr));
+                    }
+                }
+            }
+        }
+        sqlite3_finalize(selStmt);
+    }
+
+    if (updates.empty()) return;
+
+    executeSimple("BEGIN TRANSACTION;");
+    try {
+        sqlite3_stmt* updStmt = nullptr;
+        if (sqlite3_prepare_v2(db_, "UPDATE tracks SET file_path = ? WHERE id = ?;", -1, &updStmt, nullptr) == SQLITE_OK) {
+            for (const auto& [id, newPath] : updates) {
+                sqlite3_reset(updStmt);
+                sqlite3_clear_bindings(updStmt);
+                sqlite3_bind_text(updStmt, 1, newPath.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(updStmt, 2, id);
+                sqlite3_step(updStmt);
+            }
+            sqlite3_finalize(updStmt);
+        }
+        executeSimple("COMMIT;");
+    } catch (...) {
+        executeSimple("ROLLBACK;");
+        throw;
     }
 }
 
@@ -173,6 +345,21 @@ void DatabaseService::ensureSchema() {
     }
 
     executeSimple(
+        "CREATE TABLE IF NOT EXISTS arrangement_tempo_points ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  song_id INTEGER NOT NULL,"
+        "  arrangement_id INTEGER NOT NULL,"
+        "  bar INTEGER NOT NULL DEFAULT 1,"
+        "  beat REAL NOT NULL DEFAULT 1.0,"
+        "  bpm REAL NOT NULL DEFAULT 120.0,"
+        "  ramp_bars REAL NOT NULL DEFAULT 0.0,"
+        "  order_index INTEGER NOT NULL DEFAULT 0,"
+        "  FOREIGN KEY(song_id) REFERENCES songs(id) ON DELETE CASCADE,"
+        "  FOREIGN KEY(arrangement_id) REFERENCES arrangements(id) ON DELETE CASCADE"
+        ");"
+    );
+
+    executeSimple(
         "CREATE TABLE IF NOT EXISTS setlists ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  name TEXT NOT NULL,"
@@ -199,6 +386,8 @@ void DatabaseService::ensureSchema() {
         "  override_key TEXT,"
         "  override_time_signature TEXT,"
         "  arrangement_id INTEGER,"
+        "  transition_mode INTEGER NOT NULL DEFAULT 0,"
+        "  transition_crossfade_bars INTEGER NOT NULL DEFAULT 1,"
         "  FOREIGN KEY(setlist_id) REFERENCES setlists(id) ON DELETE CASCADE,"
         "  FOREIGN KEY(song_id) REFERENCES songs(id) ON DELETE CASCADE,"
         "  FOREIGN KEY(arrangement_id) REFERENCES arrangements(id) ON DELETE SET NULL"
@@ -216,6 +405,12 @@ void DatabaseService::ensureSchema() {
     }
     if (!columnExists("setlist_items", "arrangement_id")) {
         executeSimple("ALTER TABLE setlist_items ADD COLUMN arrangement_id INTEGER REFERENCES arrangements(id) ON DELETE SET NULL;");
+    }
+    if (!columnExists("setlist_items", "transition_mode")) {
+        executeSimple("ALTER TABLE setlist_items ADD COLUMN transition_mode INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!columnExists("setlist_items", "transition_crossfade_bars")) {
+        executeSimple("ALTER TABLE setlist_items ADD COLUMN transition_crossfade_bars INTEGER NOT NULL DEFAULT 1;");
     }
 
     executeSimple(
@@ -395,11 +590,18 @@ Song DatabaseService::saveSong(Song song) {
                 sqlite3_step(delSecStmt);
                 sqlite3_finalize(delSecStmt);
             }
+
+            sqlite3_stmt* delTempoStmt = nullptr;
+            if (sqlite3_prepare_v2(db_, "DELETE FROM arrangement_tempo_points WHERE song_id = ?;", -1, &delTempoStmt, nullptr) == SQLITE_OK) {
+                sqlite3_bind_int64(delTempoStmt, 1, *song.id);
+                sqlite3_step(delTempoStmt);
+                sqlite3_finalize(delTempoStmt);
+            }
         }
 
         // Backwards compatibility: if caller populated legacy song.tracks / song.sections without arrangements,
         // wrap them into a default "Main" arrangement so everything is stored uniformly.
-        if (song.arrangements.empty() && (!song.tracks.empty() || !song.sections.empty())) {
+        if (song.arrangements.empty() && (!song.tracks.empty() || !song.sections.empty() || !song.tempoPoints.empty())) {
             SongArrangement mainArr;
             mainArr.name = "Main";
             mainArr.tempo = song.tempo;
@@ -411,6 +613,7 @@ Song DatabaseService::saveSong(Song song) {
             mainArr.clickSixteenthsGain = song.clickSixteenthsGain;
             mainArr.tracks = song.tracks;
             mainArr.sections = song.sections;
+            mainArr.tempoPoints = song.tempoPoints;
             song.arrangements.push_back(std::move(mainArr));
         }
 
@@ -513,6 +716,14 @@ Song DatabaseService::saveSong(Song song) {
             throw std::runtime_error("Prepare failed for INSERT INTO song_sections");
         }
 
+        sqlite3_stmt* tempoStmt = nullptr;
+        const char* insertTempoSql = "INSERT INTO arrangement_tempo_points (song_id, arrangement_id, bar, beat, bpm, ramp_bars, order_index) VALUES (?, ?, ?, ?, ?, ?, ?);";
+        if (sqlite3_prepare_v2(db_, insertTempoSql, -1, &tempoStmt, nullptr) != SQLITE_OK) {
+            sqlite3_finalize(trackStmt);
+            sqlite3_finalize(secStmt);
+            throw std::runtime_error("Prepare failed for INSERT INTO arrangement_tempo_points");
+        }
+
         for (auto& arr : song.arrangements) {
             if (!arr.id.has_value()) continue;
 
@@ -548,18 +759,38 @@ Song DatabaseService::saveSong(Song song) {
                     sec.id = sqlite3_last_insert_rowid(db_);
                 }
             }
+
+            for (size_t i = 0; i < arr.tempoPoints.size(); ++i) {
+                auto& pt = arr.tempoPoints[i];
+                pt.orderIndex = static_cast<int>(i);
+                sqlite3_reset(tempoStmt);
+                sqlite3_bind_int64(tempoStmt, 1, *song.id);
+                sqlite3_bind_int64(tempoStmt, 2, *arr.id);
+                sqlite3_bind_int(tempoStmt, 3, std::max(1, pt.bar));
+                sqlite3_bind_double(tempoStmt, 4, std::max(1.0, pt.beat));
+                sqlite3_bind_double(tempoStmt, 5, std::clamp(pt.bpm, 20.0, 300.0));
+                sqlite3_bind_double(tempoStmt, 6, std::max(0.0, pt.rampBars));
+                sqlite3_bind_int(tempoStmt, 7, pt.orderIndex);
+
+                if (sqlite3_step(tempoStmt) == SQLITE_DONE) {
+                    pt.id = sqlite3_last_insert_rowid(db_);
+                }
+            }
         }
 
         sqlite3_finalize(trackStmt);
         sqlite3_finalize(secStmt);
+        sqlite3_finalize(tempoStmt);
 
         // Keep legacy top-level mirrors in sync with first arrangement
         if (!song.arrangements.empty()) {
             song.tracks = song.arrangements.front().tracks;
             song.sections = song.arrangements.front().sections;
+            song.tempoPoints = song.arrangements.front().tempoPoints;
         } else {
             song.tracks.clear();
             song.sections.clear();
+            song.tempoPoints.clear();
         }
 
         executeSimple("COMMIT;");
@@ -873,9 +1104,33 @@ std::vector<Song> DatabaseService::listSongs() {
             sqlite3_finalize(sStmt);
         }
 
+        const char* tempoSql = "SELECT id, bar, beat, bpm, ramp_bars, order_index, arrangement_id FROM arrangement_tempo_points WHERE song_id = ? ORDER BY bar ASC, beat ASC, order_index ASC, id ASC;";
+        sqlite3_stmt* tpStmt = nullptr;
+        if (sqlite3_prepare_v2(db_, tempoSql, -1, &tpStmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(tpStmt, 1, songId);
+            while (sqlite3_step(tpStmt) == SQLITE_ROW) {
+                TempoPoint pt;
+                pt.id = sqlite3_column_int64(tpStmt, 0);
+                pt.bar = std::max(1, sqlite3_column_int(tpStmt, 1));
+                pt.beat = std::max(1.0, sqlite3_column_double(tpStmt, 2));
+                pt.bpm = std::clamp(sqlite3_column_double(tpStmt, 3), 20.0, 300.0);
+                pt.rampBars = std::max(0.0, sqlite3_column_double(tpStmt, 4));
+                pt.orderIndex = sqlite3_column_int(tpStmt, 5);
+                int64_t arrId = sqlite3_column_int64(tpStmt, 6);
+                for (auto& arr : s.arrangements) {
+                    if (arr.id.has_value() && *arr.id == arrId) {
+                        arr.tempoPoints.push_back(pt);
+                        break;
+                    }
+                }
+            }
+            sqlite3_finalize(tpStmt);
+        }
+
         if (!s.arrangements.empty()) {
             s.tracks = s.arrangements.front().tracks;
             s.sections = s.arrangements.front().sections;
+            s.tempoPoints = s.arrangements.front().tempoPoints;
         }
     };
 
@@ -1011,9 +1266,34 @@ std::optional<Song> DatabaseService::loadSong(int64_t songId) {
         sqlite3_finalize(sStmt);
     }
 
+    // Fetch tempo points
+    const char* tempoSql = "SELECT id, bar, beat, bpm, ramp_bars, order_index, arrangement_id FROM arrangement_tempo_points WHERE song_id = ? ORDER BY bar ASC, beat ASC, order_index ASC, id ASC;";
+    sqlite3_stmt* tpStmt = nullptr;
+    if (sqlite3_prepare_v2(db_, tempoSql, -1, &tpStmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(tpStmt, 1, songId);
+        while (sqlite3_step(tpStmt) == SQLITE_ROW) {
+            TempoPoint pt;
+            pt.id = sqlite3_column_int64(tpStmt, 0);
+            pt.bar = std::max(1, sqlite3_column_int(tpStmt, 1));
+            pt.beat = std::max(1.0, sqlite3_column_double(tpStmt, 2));
+            pt.bpm = std::clamp(sqlite3_column_double(tpStmt, 3), 20.0, 300.0);
+            pt.rampBars = std::max(0.0, sqlite3_column_double(tpStmt, 4));
+            pt.orderIndex = sqlite3_column_int(tpStmt, 5);
+            int64_t arrId = sqlite3_column_int64(tpStmt, 6);
+            for (auto& arr : s.arrangements) {
+                if (arr.id.has_value() && *arr.id == arrId) {
+                    arr.tempoPoints.push_back(pt);
+                    break;
+                }
+            }
+        }
+        sqlite3_finalize(tpStmt);
+    }
+
     if (!s.arrangements.empty()) {
         s.tracks = s.arrangements.front().tracks;
         s.sections = s.arrangements.front().sections;
+        s.tempoPoints = s.arrangements.front().tempoPoints;
     }
 
     return s;
@@ -1081,7 +1361,7 @@ Setlist DatabaseService::saveSetlist(Setlist setlist) {
 
         // Insert items
         sqlite3_stmt* itemStmt = nullptr;
-        const char* insertItemSql = "INSERT INTO setlist_items (setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id) VALUES (?, ?, ?, ?, ?, ?, ?);";
+        const char* insertItemSql = "INSERT INTO setlist_items (setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id, transition_mode, transition_crossfade_bars) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
         if (sqlite3_prepare_v2(db_, insertItemSql, -1, &itemStmt, nullptr) != SQLITE_OK)
             throw std::runtime_error("Prepare failed for INSERT INTO setlist_items");
 
@@ -1111,6 +1391,9 @@ Setlist DatabaseService::saveSetlist(Setlist setlist) {
             else
                 sqlite3_bind_null(itemStmt, 7);
 
+            sqlite3_bind_int(itemStmt, 8, static_cast<int>(entry.transitionMode));
+            sqlite3_bind_int(itemStmt, 9, clampCrossfadeBars(entry.transitionCrossfadeBars));
+
             if (sqlite3_step(itemStmt) == SQLITE_DONE) {
                 entry.id = sqlite3_last_insert_rowid(db_);
                 entry.setlistId = *setlist.id;
@@ -1133,7 +1416,7 @@ std::vector<SetlistEntry> DatabaseService::listSetlistEntries(int64_t setlistId)
     std::vector<SetlistEntry> entries;
     {
         std::lock_guard<std::mutex> lock(dbMutex_);
-        const char* sql = "SELECT id, setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id FROM setlist_items WHERE setlist_id = ? ORDER BY order_index ASC, id ASC;";
+        const char* sql = "SELECT id, setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id, transition_mode, transition_crossfade_bars FROM setlist_items WHERE setlist_id = ? ORDER BY order_index ASC, id ASC;";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_int64(stmt, 1, setlistId);
@@ -1155,6 +1438,13 @@ std::vector<SetlistEntry> DatabaseService::listSetlistEntries(int64_t setlistId)
                 }
                 if (sqlite3_column_type(stmt, 7) != SQLITE_NULL)
                     e.arrangementId = sqlite3_column_int64(stmt, 7);
+                int rawMode = 0;
+                if (sqlite3_column_type(stmt, 8) != SQLITE_NULL)
+                    rawMode = sqlite3_column_int(stmt, 8);
+                e.transitionMode = clampTransitionMode(rawMode);
+                int rawXf = (sqlite3_column_type(stmt, 9) != SQLITE_NULL) ? sqlite3_column_int(stmt, 9) : 1;
+                if (rawMode == 4 && rawXf == 1) rawXf = 2; // Preserve legacy Crossfade2Bar rows
+                e.transitionCrossfadeBars = clampCrossfadeBars(rawXf);
                 entries.push_back(e);
             }
             sqlite3_finalize(stmt);

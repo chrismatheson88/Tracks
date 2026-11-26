@@ -4,6 +4,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "../Models/Song.h"
+#include "../Models/SetlistEntry.h"
 #include "Metronome.h"
 #include "PitchShiftUtils.h"
 #include "SectionJumpUtils.h"
@@ -28,8 +29,15 @@ struct AudioDeviceInfo {
     bool isDefault = false;
 };
 
-class AudioEngine : public juce::AudioIODeviceCallback {
+class AudioEngine : public juce::AudioIODeviceCallback, private juce::AsyncUpdater {
 public:
+    enum class TransitionTrigger : int {
+        None = 0,
+        CueNext = 1,
+        AutoplayNext = 2,
+        CrossfadeNext = 3
+    };
+
     AudioEngine();
     ~AudioEngine() override;
 
@@ -44,6 +52,7 @@ public:
     void loadSong(const Song& song);
     void preloadSetlist(int64_t setlistId, const std::vector<Song>& songs);
     void invalidateCachedSong(int64_t songId);
+    void clearAllCachedAudio();
     void play();
     void pause();
     void resume();
@@ -76,6 +85,8 @@ public:
     void setTrackOutputChannel(int trackIndex, int channel, bool stereoOutput = true);
 
     void setTempo(int tempo);
+    void setOriginalTrackTempo(int originalTempo);
+    int getOriginalTrackTempo() const { return originalTrackTempo_.load(std::memory_order_relaxed); }
     void setTimeSignature(const std::string& timeSignature);
     void setPitchSemitones(int semitones);
     int getPitchSemitones() const { return pitchSemitones_.load(std::memory_order_relaxed); }
@@ -83,20 +94,57 @@ public:
     void setUseTracks(bool enabled);
     bool getUseTracks() const { return useTracks_.load(std::memory_order_relaxed); }
     bool hasLoadedTracks() const { return hasTracks_.load(std::memory_order_relaxed); }
+    // True when playing a structured arrangement timeline (backing tracks enabled, OR trackless arrangement with sections)
+    bool isStructuredTimelineMode() const {
+        const bool hasT = hasTracks_.load(std::memory_order_relaxed);
+        return hasT ? useTracks_.load(std::memory_order_relaxed)
+                    : (sectionTotalBars_.load(std::memory_order_relaxed) > 0);
+    }
+    bool shouldApplyTempoMap() const {
+        return hasTracks_.load(std::memory_order_relaxed) ? useTracks_.load(std::memory_order_relaxed) : true;
+    }
 
     // Queued section navigation (executes seamlessly when the current section finishes)
+    // Also supports selecting a starting section before playback begins.
     void skipSection(int delta);
     void toggleRepeatCurrentSection();
     void clearQueuedSection();
     int getQueuedSectionIndex() const { return queuedSectionIndexAtomic_.load(std::memory_order_relaxed); }
+    int getSelectedStartSectionIndex() const { return selectedStartSectionIndexAtomic_.load(std::memory_order_relaxed); }
+    bool isInSectionStartCountIn() const { return isSectionStartCountInAtomic_.load(std::memory_order_relaxed); }
     int getSectionCount() const { return sectionCountAtomic_.load(std::memory_order_relaxed); }
 
+    // Click-only loop control (when not using tracks: active by default; deselecting stops cleanly at end of bar)
+    void toggleClickLoop();
+    void setClickLoopEnabled(bool enabled);
+    bool isClickLoopEnabled() const { return clickLoopEnabled_.load(std::memory_order_relaxed); }
+
+    // End-of-song / crossfade transitions between setlist songs
+    void setTransitionConfig(SongTransitionMode mode, int crossfadeBars, bool hasNextSong);
+    SongTransitionMode getTransitionMode() const {
+        return clampTransitionMode(transitionModeAtomic_.load(std::memory_order_relaxed));
+    }
+    int getTransitionCrossfadeBars() const {
+        return clampCrossfadeBars(transitionCrossfadeBarsAtomic_.load(std::memory_order_relaxed));
+    }
+    void setPreserveCrossfadeOnNextLoad(bool preserve) {
+        preserveCrossfadeOnNextLoad_.store(preserve, std::memory_order_relaxed);
+    }
+    std::function<void(TransitionTrigger)> onSongTransitionTriggered;
+
     // Waveform & timeline query
+    struct TimelineLayoutSnapshot {
+        std::vector<double> barPositions;       // Normalized [0..1] X positions for audio bars 0..trackBarCount (empty = uniform)
+        double waveformDurationFraction = 1.0;  // Normalized [0..1] fraction of track area occupied by audio file
+    };
+
     uint64_t getWaveformVersion() const { return waveformVersion_.load(std::memory_order_relaxed); }
     std::vector<float> getWaveformPeaks();
+    TimelineLayoutSnapshot getTimelineLayout();
     double getTrackDurationInBars() const;
     int getTrackBarCount() const;
     bool hasLeadingCountSection() const { return hasLeadingCountSection_.load(std::memory_order_relaxed); }
+    bool hasTempoAutomation() const { return hasTempoAutomation_.load(std::memory_order_relaxed); }
 
     // Metering
     std::vector<float> getOutputPeaks();
@@ -127,9 +175,24 @@ private:
         float monoGainL = 0.70710678f;
         float monoGainR = 0.70710678f;
         bool pitchShiftExcluded = false;
-        std::shared_ptr<signalsmith::stretch::SignalsmithStretch<float>> pitchShifter;
-        int64_t pitchShifterInputPos = 0;
-        bool pitchShifterPrimed = false;
+    };
+
+    struct StretchBusKey {
+        int channelA = 0;
+        bool routeAsStereo = true;
+        bool pitchShiftExcluded = false;
+        bool operator==(const StretchBusKey& o) const {
+            return channelA == o.channelA &&
+                   routeAsStereo == o.routeAsStereo &&
+                   pitchShiftExcluded == o.pitchShiftExcluded;
+        }
+    };
+
+    struct StretchBus {
+        StretchBusKey key;
+        std::shared_ptr<signalsmith::stretch::SignalsmithStretch<float>> stretcher;
+        int64_t inputPos = 0;
+        bool primed = false;
     };
 
     struct CachedSongAudio {
@@ -138,6 +201,18 @@ private:
         std::vector<LoadedTrack> tracks;
         int64_t maxLengthFrames = 0;
         std::vector<float> waveformPeaks;
+    };
+
+    struct CrossfadeOutTail {
+        bool active = false;
+        std::vector<LoadedTrack> tracks;
+        std::vector<StretchBus> stretchBuses;
+        int64_t maxSongLengthFrames = 0;
+        int64_t outTrackPos = 0;
+        int64_t elapsedSamples = 0;
+        int64_t totalFadeSamples = 0;
+        double exactRate = 1.0;
+        int semitones = 0;
     };
 
     juce::AudioDeviceManager deviceManager_;
@@ -158,13 +233,29 @@ private:
     std::atomic<int> sectionTotalBars_{0};
     std::atomic<int> sectionCountAtomic_{0};
     std::atomic<int> queuedSectionIndexAtomic_{-1};
+    std::atomic<int> selectedStartSectionIndexAtomic_{-1};
+    std::atomic<bool> isSectionStartCountInAtomic_{false};
+    std::atomic<bool> clickLoopEnabled_{true};
+    std::atomic<int> transitionModeAtomic_{0};
+    std::atomic<int> transitionCrossfadeBarsAtomic_{1};
+    std::atomic<bool> hasNextSongAtomic_{false};
+    std::atomic<int> pendingTransitionTrigger_{0};
+    std::atomic<bool> preserveCrossfadeOnNextLoad_{false};
     std::atomic<int64_t> maxSongLengthFramesAtomic_{0};
     std::atomic<float> masterGain_{1.0f};
     std::atomic<int> pitchSemitones_{0};
+    std::atomic<int> originalTrackTempo_{120};
+    std::atomic<double> cachedTrackDurationBars_{0.0};
+    std::atomic<bool> hasTempoAutomation_{false};
 
+    std::vector<TempoPoint> activeTempoPoints_;
     std::vector<SectionSpan> sectionSpans_;
     int queuedSectionIndex_ = -1;
     int queuedJumpBoundaryBar_ = -1;
+    int selectedStartSectionIndex_ = -1;
+    int clickLoopStopBar_ = -1;
+    bool awaitingTransitionSwap_ = false;
+    int64_t trackMuteUntilFrame_ = 0;
     int trackJumpFadeSamplesRemaining_ = 0;
     static constexpr int kTrackJumpFadeSamples = 64;
 
@@ -177,6 +268,7 @@ private:
 
     std::mutex waveformMutex_;
     std::vector<float> waveformPeaks_;
+    TimelineLayoutSnapshot timelineLayout_;
     std::atomic<uint64_t> waveformVersion_{0};
 
     // Setlist-scoped decoded audio cache & async loader
@@ -190,14 +282,23 @@ private:
     std::thread loaderThread_;
 
     juce::AudioBuffer<float> renderScratchBuffer_;
+    juce::AudioBuffer<float> crossfadeScratchBuffer_;
     juce::AudioBuffer<float> pitchInScratch_;
     juce::AudioBuffer<float> pitchOutScratch_;
     juce::AudioBuffer<float> pitchPrimeInScratch_;
     juce::AudioBuffer<float> pitchPrimeOutScratch_;
+    std::vector<StretchBus> stretchBuses_;
+    CrossfadeOutTail crossfadeOut_;
+
+    void handleAsyncUpdate() override;
+    void clearCrossfadeOutLocked();
+    void renderCrossfadeOutLocked(int scratchOffset, int numSamples, int numOutputChannels);
 
     void preparePitchShiftersLocked();
     void rebuildSectionSpansLocked(const std::vector<SongSection>& sections);
+    void updateTimelineMetricsLocked();
     void clearQueuedSectionLocked();
+    void clearSelectedStartSectionLocked();
     void renderSegmentLocked(int scratchOffset,
                              int segmentSamples,
                              int numOutputChannels,

@@ -15,12 +15,14 @@ namespace tracks {
 class MainComponent : public juce::Component {
 public:
     MainComponent();
-    ~MainComponent() override = default;
+    ~MainComponent() override;
 
     void resized() override;
     void paint(juce::Graphics& g) override;
 
 private:
+    class NavTabButton;
+
     enum class ActiveView {
         Library,
         OpenSet,
@@ -35,9 +37,9 @@ private:
     juce::Image brandIcon_;
     juce::Rectangle<int> brandIconBounds_;
     juce::Label brandLabel_{{}, "TRACKS"};
-    juce::TextButton navLibraryButton_{"Library"};
-    juce::TextButton navOpenSetButton_{"Open Set"};
-    juce::TextButton navSettingsButton_{"Settings"};
+    std::unique_ptr<NavTabButton> navLibraryButton_;
+    std::unique_ptr<NavTabButton> navOpenSetButton_;
+    std::unique_ptr<NavTabButton> navSettingsButton_;
     juce::TextButton relaunchButton_{"Relaunch"};
 
     // Views

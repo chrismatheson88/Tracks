@@ -4,9 +4,34 @@
 #include <cctype>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tracks {
+
+// UI limits track tempo selection to +/-10 BPM around the arrangement's recorded tempo,
+// while the underlying DSP time-stretch engine supports a much wider [0.25x, 4.0x] speed range.
+inline constexpr int kTrackTempoUiMaxDeltaBpm = 10;
+inline constexpr double kEngineMinSpeedRatio = 0.25;
+inline constexpr double kEngineMaxSpeedRatio = 4.0;
+
+inline std::pair<int, int> getAllowedTrackTempoRange(int originalTempo) {
+    int orig = std::clamp(originalTempo > 0 ? originalTempo : 120, 20, 300);
+    int minBpm = std::max(20, orig - kTrackTempoUiMaxDeltaBpm);
+    int maxBpm = std::min(300, orig + kTrackTempoUiMaxDeltaBpm);
+    return { minBpm, maxBpm };
+}
+
+inline int clampTrackTempoForUi(int targetTempo, int originalTempo) {
+    auto [minBpm, maxBpm] = getAllowedTrackTempoRange(originalTempo);
+    return std::clamp(targetTempo, minBpm, maxBpm);
+}
+
+inline double computeTempoSpeedRatio(int originalTempo, int targetTempo) {
+    if (originalTempo <= 0 || targetTempo <= 0) return 1.0;
+    double ratio = static_cast<double>(targetTempo) / static_cast<double>(originalTempo);
+    return std::clamp(ratio, kEngineMinSpeedRatio, kEngineMaxSpeedRatio);
+}
 
 inline std::optional<int> parseKeyToPitchClass(const std::string& rawKey) {
     // Trim whitespace
