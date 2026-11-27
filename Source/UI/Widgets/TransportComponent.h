@@ -53,6 +53,7 @@ public:
     void setPlayingState(bool isPlaying, bool isPaused);
     void setSongNavigationState(bool canGoPrev, bool canGoNext);
     void setTransitionConfig(SongTransitionMode mode, int crossfadeBars);
+    void setSaveToLibraryState(bool enabled, const std::string& tooltip = "");
 
     // Callbacks
     std::function<void()> onPlayClicked;
@@ -60,6 +61,7 @@ public:
     std::function<void()> onStopClicked;
     std::function<void()> onPreviousSongClicked;
     std::function<void()> onNextSongClicked;
+    std::function<void()> onSaveChangesToLibraryClicked;
     std::function<void(SongTransitionMode, int)> onTransitionChanged;
     std::function<void(float)> onMasterGainChanged;
     std::function<void(float)> onClickGainChanged;
@@ -96,6 +98,7 @@ private:
 
     juce::Label songTitleLabel_;
     juce::Label songArtistLabel_;
+    juce::TextButton saveToLibraryButton_{"Save changes to library"};
 
     juce::TextButton tempoDownButton_{"-"};
     juce::TextEditor tempoEditor_;

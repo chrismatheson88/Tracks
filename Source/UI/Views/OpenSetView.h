@@ -25,6 +25,8 @@ public:
     void executeSongTransition(AudioEngine::TransitionTrigger trigger);
     void selectArrangementForCurrentSong(std::optional<int64_t> arrangementId);
     void applySongParameters(int tempo, const std::string& key, const std::string& timeSignature);
+    bool saveCurrentSongChangesToLibrary();
+    std::pair<bool, std::string> getSaveToLibraryState() const;
     void syncSongClickSubdivisions(int64_t songId,
                                    std::optional<int64_t> arrangementId,
                                    bool clickEighths,
@@ -35,6 +37,7 @@ public:
 
     std::function<void(const Song&)> onSongSelectedForPlayback;
     std::function<void(bool, bool)> onSongNavigationStateChanged;
+    std::function<void(bool, const std::string&)> onSaveLibraryStateChanged;
 
     // ListBoxModel
     int getNumRows() override;
@@ -99,6 +102,7 @@ private:
     void saveCurrentSetlist();
     void populateSetPickerItems();
     void notifySongNavigationState();
+    void notifySaveLibraryState();
     void populateAddSongPicker();
     void openAddSongDropdown();
     void hideAddSongDropdown();

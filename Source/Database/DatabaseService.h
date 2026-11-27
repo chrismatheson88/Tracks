@@ -32,6 +32,14 @@ public:
     std::optional<Song> loadSong(int64_t songId);
     std::vector<SongTrack> listTracksForSong(int64_t songId);
     void updateTrackMix(int64_t trackId, float gain, int outputChannel, bool stereoOutput = true);
+    void updateSongBaseParams(int64_t songId,
+                              int tempo,
+                              const std::string& key,
+                              const std::string& timeSignature);
+    void updateArrangementBaseParams(int64_t arrangementId,
+                                     int tempo,
+                                     const std::string& key,
+                                     const std::string& timeSignature);
     void updateSongClickSubdivisions(int64_t songId,
                                      bool clickEighths,
                                      bool clickSixteenths,

@@ -685,6 +685,18 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     songArtistLabel_.setText("Select a song from library or set", juce::dontSendNotification);
     addAndMakeVisible(songArtistLabel_);
 
+    saveToLibraryButton_.setWantsKeyboardFocus(false);
+    saveToLibraryButton_.setEnabled(false);
+    saveToLibraryButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
+    saveToLibraryButton_.setColour(juce::TextButton::textColourOffId, AppTheme::textMuted);
+    saveToLibraryButton_.setTooltip("No unsaved Live changes for this song");
+    saveToLibraryButton_.onClick = [this]() {
+        if (onSaveChangesToLibraryClicked) {
+            onSaveChangesToLibraryClicked();
+        }
+    };
+    addChildComponent(saveToLibraryButton_);
+
     // Editable BPM / Key / Time Signature controls
     tempoDownButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
     tempoDownButton_.setTooltip("Decrease tempo by 1 BPM");
@@ -1538,6 +1550,22 @@ void TransportComponent::setSongNavigationState(bool canGoPrev, bool canGoNext) 
     if (nextSongButton_) nextSongButton_->setEnabled(canGoNext);
 }
 
+void TransportComponent::setSaveToLibraryState(bool enabled, const std::string& tooltip) {
+    saveToLibraryButton_.setEnabled(enabled);
+    if (enabled) {
+        saveToLibraryButton_.setColour(juce::TextButton::buttonColourId, AppTheme::primaryBlue);
+        saveToLibraryButton_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    } else {
+        saveToLibraryButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
+        saveToLibraryButton_.setColour(juce::TextButton::textColourOffId, AppTheme::textMuted);
+    }
+    saveToLibraryButton_.setTooltip(tooltip.empty()
+                                        ? (enabled ? "Save BPM, Key, and Time Signature changes to Library"
+                                                   : "No unsaved Live changes for this song")
+                                        : juce::String(tooltip));
+    saveToLibraryButton_.repaint();
+}
+
 void TransportComponent::setTransitionConfig(SongTransitionMode mode, int crossfadeBars) {
     currentCrossfadeBars_ = clampCrossfadeBars(crossfadeBars);
     transitionBox_.setSelectedId(static_cast<int>(mode) + 1, juce::dontSendNotification);
@@ -1768,10 +1796,16 @@ void TransportComponent::resized() {
     if (layoutMode_ == LayoutMode::ExpandedPanel) {
         auto area = getLocalBounds().reduced(16);
 
-        // Top row: Full-width song title, artist, and editable BPM/Key/Time Signature + click/track toggles
+        // Top row: Song title, artist, Save changes to library button (top right), and editable BPM/Key/Time Signature + click/track toggles
         auto headerRow = area.removeFromTop(74);
-        songTitleLabel_.setBounds(headerRow.removeFromTop(24));
-        songArtistLabel_.setBounds(headerRow.removeFromTop(18));
+        auto titleBlock = headerRow.removeFromTop(42);
+        saveToLibraryButton_.setVisible(true);
+        const int saveBtnW = std::min(168, std::max(120, titleBlock.getWidth() / 3));
+        auto saveBtnArea = titleBlock.removeFromRight(saveBtnW);
+        saveToLibraryButton_.setBounds(saveBtnArea.withHeight(28));
+        titleBlock.removeFromRight(10);
+        songTitleLabel_.setBounds(titleBlock.removeFromTop(24));
+        songArtistLabel_.setBounds(titleBlock.removeFromTop(18));
         headerRow.removeFromTop(8);
         auto badgeRow = headerRow.removeFromTop(24);
         tempoDownButton_.setVisible(true);
@@ -1959,6 +1993,7 @@ void TransportComponent::resized() {
     }
 
     faderStripBounds_.clear();
+    saveToLibraryButton_.setVisible(false);
     if (backToStartButton_) backToStartButton_->setVisible(false);
     prevSongButton_->setVisible(false);
     nextSongButton_->setVisible(false);

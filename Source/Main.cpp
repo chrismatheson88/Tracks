@@ -39,8 +39,12 @@ public:
             setContentOwned(new MainComponent(), true);
 
             setResizable(true, true);
-            setResizeLimits(960, 600, 3840, 2160);
-            centreWithSize(getWidth(), getHeight());
+            setResizeLimits(960, 600, 10000, 10000);
+            if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()) {
+                setBounds(display->userArea);
+            } else {
+                centreWithSize(getWidth(), getHeight());
+            }
 
             setVisible(true);
         }

@@ -190,6 +190,11 @@ MainComponent::MainComponent() {
             transport_->setSongNavigationState(canPrev, canNext);
         }
     };
+    openSetView_->onSaveLibraryStateChanged = [this](bool canSave, const std::string& tip) {
+        if (transport_) {
+            transport_->setSaveToLibraryState(canSave, tip);
+        }
+    };
     addChildComponent(openSetView_.get());
 
     settingsView_ = std::make_unique<SettingsView>(*db_, *audioEngine_, *controlSurface_);
@@ -243,6 +248,13 @@ MainComponent::MainComponent() {
     };
     transport_->onNextSongClicked = [this]() {
         if (openSetView_) openSetView_->selectNextSong();
+    };
+    transport_->onSaveChangesToLibraryClicked = [this]() {
+        if (activeView_ == ActiveView::OpenSet && openSetView_) {
+            if (openSetView_->saveCurrentSongChangesToLibrary() && libraryView_) {
+                libraryView_->refreshSongList();
+            }
+        }
     };
     transport_->onTransitionChanged = [this](SongTransitionMode mode, int crossfadeBars) {
         if (activeView_ == ActiveView::OpenSet && openSetView_) {
@@ -373,6 +385,8 @@ void MainComponent::switchView(ActiveView view) {
     openSetView_->setVisible(activeView_ == ActiveView::OpenSet);
     settingsView_->setVisible(activeView_ == ActiveView::Settings);
 
+    const bool prevSuppress = suppressSongAnnouncement_;
+    suppressSongAnnouncement_ = true;
     if (activeView_ == ActiveView::Library) {
         libraryView_->refreshSongList();
         audioEngine_->setTransitionConfig(SongTransitionMode::StayInCurrentSong, 1, false);
@@ -387,6 +401,7 @@ void MainComponent::switchView(ActiveView view) {
     } else if (activeView_ == ActiveView::Settings) {
         settingsView_->refreshSettings();
     }
+    suppressSongAnnouncement_ = prevSuppress;
 
     if (activeView_ != ActiveView::Settings && controlSurface_) {
         controlSurface_->cancelMidiLearn();

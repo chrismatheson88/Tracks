@@ -868,6 +868,40 @@ void DatabaseService::updateTrackMix(int64_t trackId, float gain, int outputChan
     }
 }
 
+void DatabaseService::updateSongBaseParams(int64_t songId,
+                                           int tempo,
+                                           const std::string& key,
+                                           const std::string& timeSignature) {
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    const char* sql = "UPDATE songs SET tempo = ?, key = ?, time_signature = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, std::clamp(tempo, 20, 300));
+        sqlite3_bind_text(stmt, 2, key.empty() ? "C" : key.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, timeSignature.empty() ? "4/4" : timeSignature.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 4, songId);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+void DatabaseService::updateArrangementBaseParams(int64_t arrangementId,
+                                                  int tempo,
+                                                  const std::string& key,
+                                                  const std::string& timeSignature) {
+    std::lock_guard<std::mutex> lock(dbMutex_);
+    const char* sql = "UPDATE arrangements SET tempo = ?, key = ?, time_signature = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int(stmt, 1, std::clamp(tempo, 20, 300));
+        sqlite3_bind_text(stmt, 2, key.empty() ? "C" : key.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, timeSignature.empty() ? "4/4" : timeSignature.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 4, arrangementId);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
 void DatabaseService::updateSongClickSubdivisions(int64_t songId,
                                                   bool clickEighths,
                                                   bool clickSixteenths,

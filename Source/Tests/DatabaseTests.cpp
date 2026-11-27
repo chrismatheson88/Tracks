@@ -292,6 +292,31 @@ void runDatabaseTests() {
     assert(loadedSet->entries[0].getEffectiveKey() == "A");
     assert(loadedSet->entries[0].getEffectiveTimeSignature() == "6/8");
 
+    // Test 3b: Targeted Library base parameter updates (Save changes to library)
+    {
+        auto requireDb = [](bool cond, const char* msg) {
+            if (!cond) {
+                throw std::runtime_error(std::string("DatabaseTest failed: ") + msg);
+            }
+        };
+        db.updateSongBaseParams(s1Id, 82, "Bb", "6/8");
+        auto s1AfterParams = db.loadSong(s1Id);
+        requireDb(s1AfterParams.has_value(), "updated song loaded");
+        requireDb(s1AfterParams->tempo == 82, "song tempo updated");
+        requireDb(s1AfterParams->key == "Bb", "song key updated");
+        requireDb(s1AfterParams->timeSignature == "6/8", "song time signature updated");
+        requireDb(s1AfterParams->tracks.size() == 1, "song tracks preserved intact");
+
+        db.updateArrangementBaseParams(*savedWithTrackless.arrangements[2].id, 66, "Eb", "6/8");
+        auto arrSongAfterParams = db.loadSong(*savedWithTrackless.id);
+        requireDb(arrSongAfterParams.has_value(), "updated arrangement song loaded");
+        requireDb(arrSongAfterParams->arrangements[2].tempo == 66, "arrangement tempo updated");
+        requireDb(arrSongAfterParams->arrangements[2].key == "Eb", "arrangement key updated");
+        requireDb(arrSongAfterParams->arrangements[2].timeSignature == "6/8", "arrangement time signature updated");
+        requireDb(arrSongAfterParams->arrangements[2].sections.size() == 2, "arrangement sections preserved intact");
+        requireDb(arrSongAfterParams->arrangements[2].tempoPoints.size() == 1, "arrangement tempo points preserved intact");
+    }
+
     // Test 4: App settings
     std::cout << "[Test] App settings get/set..." << std::endl;
     db.setAppSetting("volume.master_db", "-3.5");

@@ -946,6 +946,7 @@ void OpenSetView::selectArrangementForCurrentSong(std::optional<int64_t> arrange
     entry.overrideTimeSignature = std::nullopt;
     saveCurrentSetlist();
     entryListBox_.repaintRow(selectedEntryIndex_);
+    notifySaveLibraryState();
 
     if (entry.song.has_value() && onSongSelectedForPlayback) {
         onSongSelectedForPlayback(buildEffectiveSongForEntry(entry));
@@ -991,6 +992,38 @@ void OpenSetView::notifySongNavigationState() {
     audioEngine_.setTransitionConfig(getCurrentSongTransitionMode(), getCurrentSongCrossfadeBars(), canSelectNextSong());
     if (onSongNavigationStateChanged) {
         onSongNavigationStateChanged(canSelectPreviousSong(), canSelectNextSong());
+    }
+    notifySaveLibraryState();
+}
+
+std::pair<bool, std::string> OpenSetView::getSaveToLibraryState() const {
+    if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
+        selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size())) {
+        return { false, "No song selected" };
+    }
+
+    const auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
+    const bool hasOverride = entry.overrideTempo.has_value() ||
+                             entry.overrideKey.has_value() ||
+                             entry.overrideTimeSignature.has_value();
+    if (!hasOverride) {
+        return { false, "No unsaved Live changes for this song" };
+    }
+
+    const auto* arr = entry.getSelectedArrangement();
+    if (arr != nullptr && !arr->tracks.empty()) {
+        return { false, "Live tempo/key shifts on audio track arrangements stay setlist-only so original stems remain in sync" };
+    }
+
+    return { true, arr != nullptr
+                       ? "Save tempo, key, and time signature changes to this arrangement in the Library"
+                       : "Save tempo, key, and time signature changes to this song in the Library" };
+}
+
+void OpenSetView::notifySaveLibraryState() {
+    if (onSaveLibraryStateChanged) {
+        auto [canSave, tip] = getSaveToLibraryState();
+        onSaveLibraryStateChanged(canSave, tip);
     }
 }
 
@@ -1070,6 +1103,68 @@ void OpenSetView::applySongParameters(int tempo, const std::string& key, const s
 
     saveCurrentSetlist();
     entryListBox_.repaintRow(selectedEntryIndex_);
+    notifySaveLibraryState();
+}
+
+bool OpenSetView::saveCurrentSongChangesToLibrary() {
+    if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
+        selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size())) {
+        return false;
+    }
+
+    auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
+    if (!entry.song.has_value()) {
+        return false;
+    }
+
+    const bool hasOverride = entry.overrideTempo.has_value() ||
+                             entry.overrideKey.has_value() ||
+                             entry.overrideTimeSignature.has_value();
+    if (!hasOverride) {
+        return false;
+    }
+
+    const auto* selectedArr = entry.getSelectedArrangement();
+    if (selectedArr != nullptr && !selectedArr->tracks.empty()) {
+        return false;
+    }
+
+    const int effTempo = std::clamp(entry.getEffectiveTempo(), 20, 300);
+    const std::string effKey = entry.getEffectiveKey().empty() ? "C" : entry.getEffectiveKey();
+    const std::string effSig = entry.getEffectiveTimeSignature().empty() ? "4/4" : entry.getEffectiveTimeSignature();
+
+    if (selectedArr != nullptr && selectedArr->id.has_value()) {
+        const int64_t arrId = *selectedArr->id;
+        db_.updateArrangementBaseParams(arrId, effTempo, effKey, effSig);
+        for (auto& e : currentSetlist_->entries) {
+            if (e.songId == entry.songId && e.song.has_value()) {
+                for (auto& arr : e.song->arrangements) {
+                    if (arr.id.has_value() && *arr.id == arrId) {
+                        arr.tempo = effTempo;
+                        arr.key = effKey;
+                        arr.timeSignature = effSig;
+                    }
+                }
+            }
+        }
+    } else {
+        db_.updateSongBaseParams(entry.songId, effTempo, effKey, effSig);
+        for (auto& e : currentSetlist_->entries) {
+            if (e.songId == entry.songId && e.song.has_value()) {
+                e.song->tempo = effTempo;
+                e.song->key = effKey;
+                e.song->timeSignature = effSig;
+            }
+        }
+    }
+
+    entry.overrideTempo = std::nullopt;
+    entry.overrideKey = std::nullopt;
+    entry.overrideTimeSignature = std::nullopt;
+    saveCurrentSetlist();
+    entryListBox_.repaint();
+    notifySaveLibraryState();
+    return true;
 }
 
 void OpenSetView::syncSongClickSubdivisions(int64_t songId,
