@@ -121,25 +121,43 @@ void AppTheme::drawLinearSlider(juce::Graphics& g,
     }
 }
 
-void AppTheme::drawComboBox(juce::Graphics& g, int width, int height, bool /*isButtonDown*/,
+void AppTheme::drawComboBox(juce::Graphics& g, int width, int height, bool isButtonDown,
                             int buttonX, int buttonY, int buttonW, int buttonH,
                             juce::ComboBox& box) {
+    const bool hideArrow = static_cast<bool>(box.getProperties().getWithDefault("hideDropdownArrow", false));
     auto bounds = box.getLocalBounds().toFloat().reduced(0.5f);
-    g.setColour(bgInput);
+    juce::Colour fillCol = bgInput;
+    if (hideArrow && box.isEnabled()) {
+        if (isButtonDown) fillCol = bgPanel.darker(0.1f);
+        else if (box.isMouseOver(true)) fillCol = bgInput.brighter(0.08f);
+    }
+    g.setColour(fillCol);
     g.fillRoundedRectangle(bounds, 4.0f);
 
     g.setColour(box.hasKeyboardFocus(true) ? primaryBlue : borderCol);
     g.drawRoundedRectangle(bounds, 4.0f, 1.0f);
 
-    // Draw dropdown arrow
-    juce::Path arrow;
-    float arrowX = static_cast<float>(buttonX + buttonW / 2);
-    float arrowY = static_cast<float>(buttonY + buttonH / 2);
-    arrow.addTriangle(arrowX - 4.0f, arrowY - 2.0f,
-                      arrowX + 4.0f, arrowY - 2.0f,
-                      arrowX, arrowY + 3.0f);
-    g.setColour(textMuted);
-    g.fillPath(arrow);
+    if (!hideArrow) {
+        // Draw dropdown arrow
+        juce::Path arrow;
+        float arrowX = static_cast<float>(buttonX + buttonW / 2);
+        float arrowY = static_cast<float>(buttonY + buttonH / 2);
+        arrow.addTriangle(arrowX - 4.0f, arrowY - 2.0f,
+                          arrowX + 4.0f, arrowY - 2.0f,
+                          arrowX, arrowY + 3.0f);
+        g.setColour(textMuted);
+        g.fillPath(arrow);
+    }
+}
+
+void AppTheme::positionComboBoxText(juce::ComboBox& box, juce::Label& label) {
+    if (static_cast<bool>(box.getProperties().getWithDefault("hideDropdownArrow", false))) {
+        label.setBounds(2, 1, std::max(1, box.getWidth() - 4), std::max(1, box.getHeight() - 2));
+        label.setFont(getComboBoxFont(box));
+        label.setMinimumHorizontalScale(0.7f);
+        return;
+    }
+    juce::LookAndFeel_V4::positionComboBoxText(box, label);
 }
 
 void AppTheme::drawTableHeaderColumn(juce::Graphics& g, juce::TableHeaderComponent& /*header*/,

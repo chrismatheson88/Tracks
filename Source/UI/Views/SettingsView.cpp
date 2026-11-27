@@ -201,15 +201,39 @@ SettingsView::SettingsView(DatabaseService& db, AudioEngine& audioEngine, Contro
     addAndMakeVisible(voiceBox_);
 
     announceSongNameToggle_.setWantsKeyboardFocus(false);
-    announceSongNameToggle_.setTooltip("Read out the song title via text-to-speech on the Guide channel when a song is selected");
+    announceSongNameToggle_.setTooltip("Read out the song title via local neural text-to-speech on the Guide channel when a song is selected");
     announceSongNameToggle_.onClick = [this]() {
         const bool enabled = announceSongNameToggle_.getToggleState();
+        announceVoiceBox_.setEnabled(enabled);
+        testAnnounceVoiceButton_.setEnabled(enabled);
         saveSetting("audio.announce_song_name", enabled ? "1" : "0");
         if (onAnnounceSongNameChanged) {
             onAnnounceSongNameChanged(enabled);
         }
     };
     addAndMakeVisible(announceSongNameToggle_);
+
+    setupField(announceVoiceLabel_);
+    announcementVoiceOptions_ = AudioEngine::getAvailableAnnouncementVoices();
+    for (size_t i = 0; i < announcementVoiceOptions_.size(); ++i) {
+        announceVoiceBox_.addItem(announcementVoiceOptions_[i].displayName, static_cast<int>(i + 1));
+    }
+    announceVoiceBox_.onChange = [this]() {
+        const int idx = announceVoiceBox_.getSelectedId() - 1;
+        if (idx >= 0 && idx < static_cast<int>(announcementVoiceOptions_.size())) {
+            const auto& voiceId = announcementVoiceOptions_[static_cast<size_t>(idx)].id;
+            audioEngine_.setAnnouncementVoice(voiceId);
+            saveSetting("audio.announce_voice", voiceId);
+        }
+    };
+    addAndMakeVisible(announceVoiceBox_);
+
+    testAnnounceVoiceButton_.setWantsKeyboardFocus(false);
+    testAnnounceVoiceButton_.setTooltip("Preview the selected song announcement voice on the Guide channel");
+    testAnnounceVoiceButton_.onClick = [this]() {
+        audioEngine_.speakGuideText("House of the Lord");
+    };
+    addAndMakeVisible(testAnnounceVoiceButton_);
 
     // Volumes section
     setupSection(volumeSectionLabel_);
@@ -539,7 +563,23 @@ void SettingsView::refreshSettings() {
     }
 
     const std::string announceVal = db_.getAppSetting("audio.announce_song_name", "1");
-    announceSongNameToggle_.setToggleState(announceVal != "0" && announceVal != "false", juce::dontSendNotification);
+    const bool announceOn = (announceVal != "0" && announceVal != "false");
+    announceSongNameToggle_.setToggleState(announceOn, juce::dontSendNotification);
+    announceVoiceBox_.setEnabled(announceOn);
+    testAnnounceVoiceButton_.setEnabled(announceOn);
+
+    const std::string savedAnnounceVoice = db_.getAppSetting("audio.announce_voice", "af_heart");
+    int selectedAnnounceVoiceId = 1;
+    for (size_t i = 0; i < announcementVoiceOptions_.size(); ++i) {
+        if (announcementVoiceOptions_[i].id == savedAnnounceVoice) {
+            selectedAnnounceVoiceId = static_cast<int>(i + 1);
+            break;
+        }
+    }
+    if (!announcementVoiceOptions_.empty()) {
+        announceVoiceBox_.setSelectedId(selectedAnnounceVoiceId, juce::dontSendNotification);
+        audioEngine_.setAnnouncementVoice(announcementVoiceOptions_[static_cast<size_t>(selectedAnnounceVoiceId - 1)].id);
+    }
 
     float masterDb = 0.0f;
     try { masterDb = std::stof(db_.getAppSetting("volume.master_db", "0.0")); } catch (...) {}
@@ -760,6 +800,13 @@ void SettingsView::resized() {
 
     area.removeFromTop(gap);
     announceSongNameToggle_.setBounds(area.removeFromTop(24));
+
+    area.removeFromTop(6);
+    auto asRow3 = area.removeFromTop(rowH);
+    announceVoiceLabel_.setBounds(asRow3.removeFromLeft(120));
+    testAnnounceVoiceButton_.setBounds(asRow3.removeFromRight(60));
+    asRow3.removeFromRight(6);
+    announceVoiceBox_.setBounds(asRow3);
 
     area.removeFromTop(sectionGap);
 

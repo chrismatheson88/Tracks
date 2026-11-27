@@ -37,9 +37,10 @@ public:
         }
     };
 
-    // Opens the file, decodes ONLY Chunk 0 (~256 KB) + computes the 512-bin waveform envelope,
-    // then immediately closes the file handle. Never allocates a full-song float buffer.
-    static std::shared_ptr<StreamingAudioTrack> createFromFile(const std::string& filePath);
+    // Opens the file, decodes ONLY Chunk 0 (~256 KB, resampled to targetSampleRate if needed)
+    // + computes the 512-bin waveform envelope, then immediately closes the file handle.
+    static std::shared_ptr<StreamingAudioTrack> createFromFile(const std::string& filePath,
+                                                               double targetSampleRate = 0.0);
 
     uint64_t getUid() const { return uid_; }
     const std::string& getFilePath() const { return filePath_; }
@@ -47,6 +48,7 @@ public:
     int64_t getNumSamples() const { return totalSamples_; }
     int64_t getTotalSamples() const { return totalSamples_; }
     double getSampleRate() const { return sampleRate_; }
+    double getFileSampleRate() const { return fileSampleRate_; }
     int64_t getTotalChunks() const { return totalChunks_; }
 
     float getWaveformBin(int binIndex) const {
@@ -131,9 +133,13 @@ private:
     uint64_t uid_ = 0;
     std::string filePath_;
     int numChannels_ = 0;
+    int64_t rawFileSamples_ = 0;
     int64_t totalSamples_ = 0;
     int64_t totalChunks_ = 0;
+    double fileSampleRate_ = 44100.0;
     double sampleRate_ = 44100.0;
+    double resampleRatio_ = 1.0; // fileSampleRate_ / sampleRate_
+    bool needsResample_ = false;
 
     std::shared_ptr<const PcmChunk> introChunk_; // Chunk 0, always pinned
     std::array<float, kWaveformBins> peakBins_{};

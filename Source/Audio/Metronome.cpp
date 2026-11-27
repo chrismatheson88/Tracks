@@ -272,6 +272,25 @@ std::string Metronome::getCountInVoiceWordForBeat(int bar, int beatInBar) const 
             return "";
         }
 
+        if (isCompound_ && pulseCountPerBar_ == 6) {
+            if (w.lengthBars == 1) {
+                const char* oneBar[6] = { "one", "two", "three", "four", "five", "six" };
+                return (curBeatInBar >= 0 && curBeatInBar < 6) ? oneBar[curBeatInBar] : "";
+            }
+            // For 6/8 2-bar (or final 2 bars of longer) count sections:
+            // Bar 1: one, [rest], [rest], two, [rest], [rest]; Bar 2: one, two, three, four, five, six
+            int offsetFromEnd = w.lengthBars - 2;
+            if (localBar >= offsetFromEnd) {
+                int twoBarIdx = (localBar - offsetFromEnd) * 6 + curBeatInBar;
+                const char* pattern[12] = {
+                    "one", "", "", "two", "", "",
+                    "one", "two", "three", "four", "five", "six"
+                };
+                return (twoBarIdx >= 0 && twoBarIdx < 12) ? pattern[twoBarIdx] : "";
+            }
+            return "";
+        }
+
         const char* words[8] = { "one", "two", "three", "four", "five", "six", "seven", "eight" };
         return (curBeatInBar >= 0 && curBeatInBar < 8) ? words[curBeatInBar] : "";
     };
@@ -394,13 +413,15 @@ void Metronome::renderBlock(juce::AudioBuffer<float>& outputBuffer, int startSam
             currentBeatInBar_ = beatInBar;
             currentBar_ = static_cast<int>(beatIndex / pulseCountPerBar_);
 
-            bool isAccent = isCompound_ ? (beatInBar % 3 == 0) : (beatInBar == 0);
+            const bool isSixEight = isCompound_ && pulseCountPerBar_ == 6;
+            const bool isAccent = (isCompound_ && !isSixEight) ? (beatInBar % 3 == 0) : (beatInBar == 0);
+            const bool isCompoundSubdivision = isCompound_ && (beatInBar % 3 != 0);
             if (numOutputChannels > 0) {
                 if (isAccent) {
                     if (accentClick_.getNumSamples() > 0) {
                         activeSamples_.push_back({ &accentClick_, beatStart, clickGain_, effClickCh });
                     }
-                } else if (isCompound_ && enableEighths_) {
+                } else if (isCompoundSubdivision && enableEighths_) {
                     const auto& buf = resolveEighthBuf();
                     if (buf.getNumSamples() > 0) {
                         activeSamples_.push_back({ &buf, beatStart, eighthClickGain_, effClickCh });

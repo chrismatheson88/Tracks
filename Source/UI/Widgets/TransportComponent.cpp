@@ -122,6 +122,8 @@ public:
         addAndMakeVisible(nameLabel_);
 
         updateChannelOptions(numDeviceChannels, initialChannel, initialStereoOutput);
+        channelBox_.getProperties().set("hideDropdownArrow", true);
+        channelBox_.setJustificationType(juce::Justification::centred);
         channelBox_.onChange = [this]() {
             int id = channelBox_.getSelectedId();
             if (id >= kStereoChannelItemBaseId) {
@@ -190,7 +192,7 @@ private:
 
 class TransportComponent::TransportIconButton : public juce::Button {
 public:
-    enum class IconType { Previous, SkipBack, Play, Pause, Stop, FadeOut, Repeat, SkipForward, Next };
+    enum class IconType { BackToStart, Previous, SkipBack, Play, Pause, Stop, FadeOut, Repeat, SkipForward, Next };
 
     TransportIconButton(const juce::String& name, IconType type, juce::Colour baseColour)
         : juce::Button(name), iconType_(type), baseColour_(baseColour) {
@@ -252,6 +254,34 @@ public:
                             : AppTheme::textMuted.withAlpha(0.45f));
 
         switch (iconType_) {
+            case IconType::BackToStart: {
+                // Counter-clockwise restart circular arrow (back to start)
+                const float r = halfH * 0.86f;
+                const float startAng = -juce::MathConstants<float>::pi * 0.30f; // ~10 o'clock (upper-left)
+                const float endAng = juce::MathConstants<float>::pi * 1.32f;    // ~8 o'clock (292 deg sweep)
+                juce::Path arc;
+                arc.addCentredArc(cx, cy, r, r, 0.0f, startAng, endAng, true);
+                g.strokePath(arc, juce::PathStrokeType(1.9f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+                // Exact counter-clockwise arrowhead at startAng along unit tangent (-cos, -sin) & normal (sin, -cos)
+                const float px = cx + r * std::sin(startAng);
+                const float py = cy - r * std::cos(startAng);
+                const float tx = -std::cos(startAng);
+                const float ty = -std::sin(startAng);
+                const float nx = std::sin(startAng);
+                const float ny = -std::cos(startAng);
+                const float tipX = px + tx * 1.6f;
+                const float tipY = py + ty * 1.6f;
+                const float baseX = px - tx * 2.8f;
+                const float baseY = py - ty * 2.8f;
+                const float wing = 2.9f;
+                juce::Path head;
+                head.addTriangle(tipX, tipY,
+                                 baseX + nx * wing, baseY + ny * wing,
+                                 baseX - nx * wing, baseY - ny * wing);
+                g.fillPath(head);
+                break;
+            }
             case IconType::Play: {
                 const float triW = iconH * 0.88f;
                 const float x0 = cx - triW * 0.42f;
@@ -521,6 +551,14 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     : audioEngine_(audioEngine) {
     setOpaque(true);
 
+    // Back to Start button (shown only in "Just click" arrangement, to the left of Previous Song)
+    backToStartButton_ = std::make_unique<TransportIconButton>("Back to Start", TransportIconButton::IconType::BackToStart, AppTheme::bgPanel);
+    backToStartButton_->setEnabled(false);
+    backToStartButton_->onClick = [this]() {
+        audioEngine_.toggleClickRestart();
+    };
+    addChildComponent(backToStartButton_.get());
+
     // Previous song button
     prevSongButton_ = std::make_unique<TransportIconButton>("Previous Song", TransportIconButton::IconType::Previous, AppTheme::bgPanel);
     prevSongButton_->setEnabled(false);
@@ -594,6 +632,12 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     addChildComponent(nextSongButton_.get());
 
     // Song end transition dropdown (shown to the right of play controls in ExpandedPanel / Open Set view)
+    transitionHeadingLabel_.setFont(juce::Font(10.5f, juce::Font::bold));
+    transitionHeadingLabel_.setColour(juce::Label::textColourId, AppTheme::textMuted);
+    transitionHeadingLabel_.setJustificationType(juce::Justification::bottomLeft);
+    transitionHeadingLabel_.setBorderSize(juce::BorderSize<int>(0));
+    addChildComponent(transitionHeadingLabel_);
+
     transitionBox_.addItem("Stay in current song", 1);
     transitionBox_.addItem("Cue next song", 2);
     transitionBox_.addItem("Autoplay next song", 3);
@@ -823,6 +867,8 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
 
     lastDeviceChannelCount_ = std::max(1, audioEngine_.getCurrentOutputChannels());
     populateChannelCombo(clickChannelBox_, lastDeviceChannelCount_);
+    clickChannelBox_.getProperties().set("hideDropdownArrow", true);
+    clickChannelBox_.setJustificationType(juce::Justification::centred);
     clickChannelBox_.setSelectedId(std::clamp(audioEngine_.getClickChannel() + 1, 1, lastDeviceChannelCount_), juce::dontSendNotification);
     clickChannelBox_.onChange = [this]() {
         int ch = std::max(0, clickChannelBox_.getSelectedId() - 1);
@@ -832,6 +878,8 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     addChildComponent(clickChannelBox_);
 
     populateChannelCombo(guideChannelBox_, lastDeviceChannelCount_);
+    guideChannelBox_.getProperties().set("hideDropdownArrow", true);
+    guideChannelBox_.setJustificationType(juce::Justification::centred);
     guideChannelBox_.setSelectedId(std::clamp(audioEngine_.getGuideChannel() + 1, 1, lastDeviceChannelCount_), juce::dontSendNotification);
     guideChannelBox_.onChange = [this]() {
         int ch = std::max(0, guideChannelBox_.getSelectedId() - 1);
@@ -1564,7 +1612,21 @@ void TransportComponent::timerCallback() {
                          playing ? "Skip Forward to Next Section" : "Select Later Start Section");
 
     const bool clickLoopOn = audioEngine_.isClickLoopEnabled();
+    const bool clickRestartQueued = audioEngine_.isClickRestartQueued();
     const bool fadingOut = audioEngine_.isFadingOut();
+    if (backToStartButton_) {
+        const bool shouldShowBackToStart = (layoutMode_ == LayoutMode::ExpandedPanel) && justClickSelected_;
+        if (backToStartButton_->isVisible() != shouldShowBackToStart) {
+            resized();
+        }
+        backToStartButton_->setActiveHighlight(clickRestartQueued);
+        backToStartButton_->setBaseColour(clickRestartQueued ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
+        setBtnStateIfChanged(backToStartButton_.get(),
+                             shouldShowBackToStart && !showWaveform && playing && !paused && !fadingOut,
+                             clickRestartQueued
+                                 ? "Restarting From Count After This Bar - Click to Cancel"
+                                 : "Back to Start (Restart Count After This Bar)");
+    }
     if (fadeOutButton_) {
         fadeOutButton_->setActiveHighlight(fadingOut);
         fadeOutButton_->setBaseColour(fadingOut ? AppTheme::warningAmber.darker(0.25f) : AppTheme::bgPanel);
@@ -1581,7 +1643,9 @@ void TransportComponent::timerCallback() {
             repeatSectionButton_->setActiveHighlight(clickLoopOn);
             repeatSectionButton_->setBaseColour(clickLoopOn ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
             juce::String tip;
-            if (playing) {
+            if (clickRestartQueued) {
+                tip = "Loop Temporarily Paused for Restart - Click to Cancel Restart & Keep Looping";
+            } else if (playing) {
                 tip = clickLoopOn ? "Loop Active - Click to End After This Bar"
                                   : "Ending After This Bar - Click to Keep Looping";
             } else {
@@ -1609,7 +1673,8 @@ void TransportComponent::timerCallback() {
                                 selectedStartSec,
                                 inSectionStartCountIn,
                                 clickLoopOn,
-                                fadingOut);
+                                fadingOut,
+                                clickRestartQueued);
 
     auto peaks = audioEngine_.getOutputPeaks();
     bool anyPeakActive = false;
@@ -1733,16 +1798,19 @@ void TransportComponent::resized() {
         badgeRow.removeFromLeft(4);
         sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(68));
 
-        area.removeFromTop(12);
+        area.removeFromTop(8);
 
-        // Transport controls row: Previous Song | Skip Back | Play/Pause | Stop | Fade Out | Repeat Section | Skip Forward | Next Song   [Transition Dropdown] [Bars]
-        auto transportRow = area.removeFromTop(36);
+        // Transport controls row: [Back to Start (Just click)] | Previous Song | Skip Back | Play/Pause | Stop | Fade Out | Repeat Section | Skip Forward | Next Song   [At end: Dropdown] [Bars]
+        auto transportRow = area.removeFromTop(42);
+        const bool showBackToStart = justClickSelected_;
+        if (backToStartButton_) backToStartButton_->setVisible(showBackToStart);
         prevSongButton_->setVisible(true);
         skipBackButton_->setVisible(true);
         fadeOutButton_->setVisible(true);
         repeatSectionButton_->setVisible(true);
         skipForwardButton_->setVisible(true);
         nextSongButton_->setVisible(true);
+        transitionHeadingLabel_.setVisible(true);
         transitionBox_.setVisible(true);
 
         const bool showCrossfadeInput = (transitionBox_.getSelectedId() == 4);
@@ -1752,7 +1820,8 @@ void TransportComponent::resized() {
         const int btnGap = 6;
         const int iconBtnW = 42;
         const int playW = 56;
-        const int totalBtnW = iconBtnW * 7 + playW + btnGap * 7;
+        const int iconBtnCount = showBackToStart ? 8 : 7;
+        const int totalBtnW = iconBtnW * iconBtnCount + playW + btnGap * iconBtnCount;
         const int xfInputW = showCrossfadeInput ? (4 + 42 + 4 + 30) : 0; // gap + stepper + gap + "bars"
         const int maxRightBlockW = std::max(140, transportRow.getWidth() - totalBtnW - 12);
         const int dropdownW = showCrossfadeInput
@@ -1760,8 +1829,10 @@ void TransportComponent::resized() {
                                   : std::clamp(maxRightBlockW, 136, 178);
         const int totalRightW = dropdownW + xfInputW;
 
-        auto rightBlock = juce::Rectangle<int>(transportRow.getRight() - totalRightW,
-                                               transportRow.getY() + 4,
+        const int rightX = transportRow.getRight() - totalRightW;
+        transitionHeadingLabel_.setBounds(rightX + 1, transportRow.getY(), dropdownW, 13);
+        auto rightBlock = juce::Rectangle<int>(rightX,
+                                               transportRow.getBottom() - 28,
                                                totalRightW,
                                                28);
         transitionBox_.setBounds(rightBlock.removeFromLeft(dropdownW));
@@ -1777,7 +1848,11 @@ void TransportComponent::resized() {
         const int maxBtnX = rightEdgeForBtns - totalBtnW;
         const int btnX = std::max(transportRow.getX(), std::min(centeredX, maxBtnX));
         const int availBtnW = std::min(totalBtnW, std::max(0, rightEdgeForBtns - btnX));
-        auto btnGroup = juce::Rectangle<int>(btnX, transportRow.getY(), availBtnW, 36);
+        auto btnGroup = juce::Rectangle<int>(btnX, transportRow.getBottom() - 36, availBtnW, 36);
+        if (showBackToStart && backToStartButton_) {
+            backToStartButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+            btnGroup.removeFromLeft(btnGap);
+        }
         prevSongButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
         btnGroup.removeFromLeft(btnGap);
         skipBackButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
@@ -1884,8 +1959,10 @@ void TransportComponent::resized() {
     }
 
     faderStripBounds_.clear();
+    if (backToStartButton_) backToStartButton_->setVisible(false);
     prevSongButton_->setVisible(false);
     nextSongButton_->setVisible(false);
+    transitionHeadingLabel_.setVisible(false);
     transitionBox_.setVisible(false);
     if (crossfadeBarsStepper_) crossfadeBarsStepper_->setVisible(false);
     crossfadeBarsLabel_.setVisible(false);

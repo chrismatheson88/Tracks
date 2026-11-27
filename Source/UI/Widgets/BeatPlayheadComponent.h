@@ -35,7 +35,8 @@ public:
                         int selectedStartSectionIndex = -1,
                         bool isSectionStartCountIn = false,
                         bool clickLoopEnabled = true,
-                        bool isFadingOut = false);
+                        bool isFadingOut = false,
+                        bool clickRestartQueued = false);
 
     void paint(juce::Graphics& g) override;
     void mouseMove(const juce::MouseEvent& e) override;
@@ -64,6 +65,7 @@ private:
     bool isSectionStartCountIn_ = false;
     bool clickLoopEnabled_ = true;
     bool isFadingOut_ = false;
+    bool clickRestartQueued_ = false;
     double trackDurationBars_ = 0.0;
     int trackBarCount_ = 0;
     std::vector<float> waveformPeaks_;

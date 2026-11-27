@@ -66,9 +66,73 @@ float computeMonoPeakOfBuffer(const juce::AudioBuffer<float>& buf, int start, in
     return peak;
 }
 
+float cubicHermiteSample(const float* buf, int bufLen, double srcPos) {
+    if (bufLen <= 0) return 0.0f;
+    const int i1 = static_cast<int>(std::floor(srcPos));
+    const float t = static_cast<float>(srcPos - static_cast<double>(i1));
+    auto at = [&](int idx) -> float {
+        return buf[std::clamp(idx, 0, bufLen - 1)];
+    };
+    const float y0 = at(i1 - 1);
+    const float y1 = at(i1);
+    const float y2 = at(i1 + 1);
+    const float y3 = at(i1 + 2);
+    const float c0 = y1;
+    const float c1 = 0.5f * (y2 - y0);
+    const float c2 = y0 - 2.5f * y1 + 2.0f * y2 - 0.5f * y3;
+    const float c3 = 0.5f * (y3 - y0) + 1.5f * (y1 - y2);
+    return ((c3 * t + c2) * t + c1) * t + c0;
+}
+
+std::shared_ptr<StreamingAudioTrack::PcmChunk> decodeChunkResampled(
+    int64_t chunkIdx,
+    int64_t outStart,
+    int outLen,
+    int numChannels,
+    int64_t rawFileSamples,
+    double resampleRatio,
+    juce::AudioFormatReader& reader,
+    juce::AudioBuffer<float>& readScratch) {
+    auto chunk = std::make_shared<StreamingAudioTrack::PcmChunk>();
+    chunk->chunkIndex = chunkIdx;
+    chunk->numChannels = numChannels;
+    chunk->numSamples = outLen;
+    if (numChannels <= 0 || outLen <= 0) return chunk;
+
+    const int64_t srcReadStart = std::max<int64_t>(0, static_cast<int64_t>(std::floor(static_cast<double>(outStart) * resampleRatio)) - 2);
+    const int64_t srcReadEnd = std::min<int64_t>(rawFileSamples,
+                                                 static_cast<int64_t>(std::ceil(static_cast<double>(outStart + outLen - 1) * resampleRatio)) + 4);
+    const int srcLen = static_cast<int>(std::max<int64_t>(0, srcReadEnd - srcReadStart));
+    if (srcLen <= 0) {
+        chunk->data.assign(static_cast<size_t>(numChannels) * static_cast<size_t>(outLen), 0);
+        return chunk;
+    }
+
+    if (readScratch.getNumChannels() < numChannels || readScratch.getNumSamples() < srcLen) {
+        readScratch.setSize(numChannels, srcLen, false, false, true);
+    }
+    readScratch.clear(0, srcLen);
+    if (!reader.read(&readScratch, 0, srcLen, srcReadStart, true, numChannels >= 2)) {
+        return nullptr;
+    }
+
+    chunk->data.resize(static_cast<size_t>(numChannels) * static_cast<size_t>(outLen));
+    for (int ch = 0; ch < numChannels; ++ch) {
+        const float* s = readScratch.getReadPointer(ch);
+        int16_t* d = chunk->data.data() + static_cast<size_t>(ch) * static_cast<size_t>(outLen);
+        for (int i = 0; i < outLen; ++i) {
+            const double localPos = static_cast<double>(outStart + i) * resampleRatio - static_cast<double>(srcReadStart);
+            const float v = std::clamp(cubicHermiteSample(s, srcLen, localPos), -1.0f, 1.0f);
+            d[i] = static_cast<int16_t>(std::lrintf(v * 32767.0f));
+        }
+    }
+    return chunk;
+}
+
 } // namespace
 
-std::shared_ptr<StreamingAudioTrack> StreamingAudioTrack::createFromFile(const std::string& filePath) {
+std::shared_ptr<StreamingAudioTrack> StreamingAudioTrack::createFromFile(const std::string& filePath,
+                                                                         double targetSampleRate) {
     juce::File file(filePath);
     if (!file.existsAsFile()) return nullptr;
 
@@ -82,25 +146,40 @@ std::shared_ptr<StreamingAudioTrack> StreamingAudioTrack::createFromFile(const s
     auto track = std::shared_ptr<StreamingAudioTrack>(new StreamingAudioTrack());
     track->filePath_ = filePath;
     track->numChannels_ = std::min(2, static_cast<int>(reader->numChannels));
-    track->totalSamples_ = static_cast<int64_t>(reader->lengthInSamples);
+    track->rawFileSamples_ = static_cast<int64_t>(reader->lengthInSamples);
+    track->fileSampleRate_ = (reader->sampleRate > 0.0) ? reader->sampleRate : 44100.0;
+    track->sampleRate_ = (targetSampleRate > 1.0) ? targetSampleRate : track->fileSampleRate_;
+    track->needsResample_ = std::abs(track->fileSampleRate_ - track->sampleRate_) > 1.0;
+    track->resampleRatio_ = track->needsResample_ ? (track->fileSampleRate_ / track->sampleRate_) : 1.0;
+    track->totalSamples_ = track->needsResample_
+                               ? std::max<int64_t>(1, static_cast<int64_t>(std::llround(static_cast<double>(track->rawFileSamples_) / track->resampleRatio_)))
+                               : track->rawFileSamples_;
     track->totalChunks_ = (track->totalSamples_ + kChunkSamples - 1) >> kChunkShift;
-    track->sampleRate_ = (reader->sampleRate > 0.0) ? reader->sampleRate : 44100.0;
 
-    // 1. Decode ONLY Chunk 0 (~1.48s @ 44.1kHz) into pinned introChunk_
-    const int introLen = static_cast<int>(std::min<int64_t>(kChunkSamples, track->totalSamples_));
-    juce::AudioBuffer<float> scratch(track->numChannels_, introLen);
-    scratch.clear();
-    reader->read(&scratch, 0, introLen, 0, true, track->numChannels_ >= 2);
-    track->introChunk_ = convertToPcmChunk(0, scratch, introLen);
+    // 1. Decode ONLY Chunk 0 (~1.48s @ 44.1kHz, resampled to device sample rate if needed) into pinned introChunk_
+    const int introOutLen = static_cast<int>(std::min<int64_t>(kChunkSamples, track->totalSamples_));
+    juce::AudioBuffer<float> scratch(track->numChannels_, std::max(introOutLen, kChunkSamples));
+    int introRawLen = 0;
+    if (track->needsResample_) {
+        track->introChunk_ = decodeChunkResampled(0, 0, introOutLen, track->numChannels_,
+                                                  track->rawFileSamples_, track->resampleRatio_,
+                                                  *reader, scratch);
+        if (!track->introChunk_) return nullptr;
+    } else {
+        introRawLen = introOutLen;
+        scratch.clear();
+        reader->read(&scratch, 0, introRawLen, 0, true, track->numChannels_ >= 2);
+        track->introChunk_ = convertToPcmChunk(0, scratch, introRawLen);
+    }
 
-    // 2. Compute 512-bin waveform envelope using bounded temporary RAM (<= 512 KB)
-    if (isDirectSeekUncompressedFormat(filePath) && track->totalSamples_ > kChunkSamples) {
+    // 2. Compute 512-bin waveform envelope in raw file frame space (identical timeline fractions!)
+    if (isDirectSeekUncompressedFormat(filePath) && track->rawFileSamples_ > kChunkSamples) {
         // Fast path for WAV/AIFF: sample a short window in each of the 512 bins (~256 KB total read, ~1-2 ms)
         constexpr int kProbeSamples = 128;
         juce::AudioBuffer<float> probe(track->numChannels_, kProbeSamples);
         for (int b = 0; b < kWaveformBins; ++b) {
-            const int64_t startF = (static_cast<int64_t>(b) * track->totalSamples_) / kWaveformBins;
-            const int64_t endF = std::max(startF + 1, (static_cast<int64_t>(b + 1) * track->totalSamples_) / kWaveformBins);
+            const int64_t startF = (static_cast<int64_t>(b) * track->rawFileSamples_) / kWaveformBins;
+            const int64_t endF = std::max(startF + 1, (static_cast<int64_t>(b + 1) * track->rawFileSamples_) / kWaveformBins);
             const int64_t span = endF - startF;
 
             // Sample 2 probes per bin (start & middle) for smooth, accurate envelope representation
@@ -111,10 +190,10 @@ std::shared_ptr<StreamingAudioTrack> StreamingAudioTrack::createFromFile(const s
                 const int64_t pos = probes[p];
                 const int nRead = static_cast<int>(std::min<int64_t>({ static_cast<int64_t>(kProbeSamples),
                                                                        endF - pos,
-                                                                       track->totalSamples_ - pos }));
+                                                                       track->rawFileSamples_ - pos }));
                 if (nRead <= 0) continue;
 
-                if (pos + nRead <= introLen) {
+                if (introRawLen > 0 && pos + nRead <= introRawLen) {
                     binPeak = std::max(binPeak, computeMonoPeakOfBuffer(scratch, static_cast<int>(pos), nRead));
                 } else {
                     probe.clear();
@@ -127,14 +206,14 @@ std::shared_ptr<StreamingAudioTrack> StreamingAudioTrack::createFromFile(const s
     } else {
         // Streaming single-pass scan (for compressed M4A/MP3 or short files): reuses a single 64K-sample buffer
         auto accumulateChunkIntoBins = [&](const juce::AudioBuffer<float>& buf, int64_t chunkStart, int count) {
-            if (count <= 0 || track->totalSamples_ <= 0) return;
+            if (count <= 0 || track->rawFileSamples_ <= 0) return;
             const int ch = buf.getNumChannels();
             const float* L = buf.getReadPointer(0);
             const float* R = (ch >= 2) ? buf.getReadPointer(1) : nullptr;
-            const int step = std::max(1, static_cast<int>(track->totalSamples_ / (kWaveformBins * 64)));
+            const int step = std::max(1, static_cast<int>(track->rawFileSamples_ / (kWaveformBins * 64)));
             for (int i = 0; i < count; i += step) {
                 const int64_t f = chunkStart + i;
-                const int b = std::clamp(static_cast<int>((f * kWaveformBins) / track->totalSamples_), 0, kWaveformBins - 1);
+                const int b = std::clamp(static_cast<int>((f * kWaveformBins) / track->rawFileSamples_), 0, kWaveformBins - 1);
                 const float sample = R ? (0.5f * (L[i] + R[i])) : L[i];
                 const float a = std::abs(sample);
                 if (a > track->peakBins_[static_cast<size_t>(b)]) {
@@ -143,10 +222,13 @@ std::shared_ptr<StreamingAudioTrack> StreamingAudioTrack::createFromFile(const s
             }
         };
 
-        accumulateChunkIntoBins(scratch, 0, introLen);
-        int64_t pos = introLen;
-        while (pos < track->totalSamples_) {
-            const int nRead = static_cast<int>(std::min<int64_t>(kChunkSamples, track->totalSamples_ - pos));
+        int64_t pos = 0;
+        if (introRawLen > 0) {
+            accumulateChunkIntoBins(scratch, 0, introRawLen);
+            pos = introRawLen;
+        }
+        while (pos < track->rawFileSamples_) {
+            const int nRead = static_cast<int>(std::min<int64_t>(kChunkSamples, track->rawFileSamples_ - pos));
             if (scratch.getNumSamples() < nRead) {
                 scratch.setSize(track->numChannels_, nRead, false, false, true);
             }
@@ -302,20 +384,28 @@ bool StreamingAudioTrack::loadChunkFromReader(int64_t chunkIdx,
                                               juce::AudioBuffer<float>& readScratch) {
     if (chunkIdx <= 0 || chunkIdx >= totalChunks_) return false;
 
-    const int64_t startSample = chunkIdx << kChunkShift;
-    const int nRead = static_cast<int>(std::min<int64_t>(kChunkSamples, totalSamples_ - startSample));
-    if (nRead <= 0) return false;
+    const int64_t outStart = chunkIdx << kChunkShift;
+    const int outLen = static_cast<int>(std::min<int64_t>(kChunkSamples, totalSamples_ - outStart));
+    if (outLen <= 0) return false;
 
-    if (readScratch.getNumChannels() < numChannels_ || readScratch.getNumSamples() < nRead) {
+    if (needsResample_) {
+        auto chunk = decodeChunkResampled(chunkIdx, outStart, outLen, numChannels_,
+                                          rawFileSamples_, resampleRatio_, reader, readScratch);
+        if (!chunk) return false;
+        installChunk(std::move(chunk));
+        return true;
+    }
+
+    if (readScratch.getNumChannels() < numChannels_ || readScratch.getNumSamples() < outLen) {
         readScratch.setSize(numChannels_, kChunkSamples, false, false, true);
     }
-    readScratch.clear(0, nRead);
+    readScratch.clear(0, outLen);
 
-    if (!reader.read(&readScratch, 0, nRead, startSample, true, numChannels_ >= 2)) {
+    if (!reader.read(&readScratch, 0, outLen, outStart, true, numChannels_ >= 2)) {
         return false;
     }
 
-    auto chunk = convertToPcmChunk(chunkIdx, readScratch, nRead);
+    auto chunk = convertToPcmChunk(chunkIdx, readScratch, outLen);
     installChunk(std::move(chunk));
     return true;
 }

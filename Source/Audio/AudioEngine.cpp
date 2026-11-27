@@ -8,8 +8,17 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iomanip>
 #include <set>
+#include <sstream>
 #include <unordered_set>
+#if JUCE_MAC || JUCE_LINUX
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -22,14 +31,15 @@ AudioEngine::AudioEngine() {
     deviceManager_.addAudioCallback(this);
 
     auto* curDev = deviceManager_.getCurrentAudioDevice();
-    currentSampleRate_ = curDev ? curDev->getCurrentSampleRate() : 44100.0;
+    const double initialSr = (curDev && curDev->getCurrentSampleRate() > 1.0) ? curDev->getCurrentSampleRate() : 44100.0;
+    currentSampleRate_.store(initialSr, std::memory_order_relaxed);
     int chCount = curDev ? curDev->getActiveOutputChannels().countNumberOfSetBits() : 2;
     chCount = std::max(1, chCount);
     currentOutputChannels_.store(chCount, std::memory_order_relaxed);
 
     activePeakChannels_.store(std::min(chCount, kMaxMeterChannels), std::memory_order_relaxed);
     for (auto& p : outputPeaksAtomic_) p.store(0.0f, std::memory_order_relaxed);
-    metronome_.prepare(currentSampleRate_);
+    metronome_.prepare(initialSr);
     pitchInScratch_.setSize(2, 8192);
     pitchOutScratch_.setSize(2, 4096);
     pitchPrimeInScratch_.setSize(2, 32768);
@@ -303,7 +313,10 @@ std::vector<std::string> AudioEngine::getAvailableVoicePacks() const {
 }
 
 bool AudioEngine::selectClickPack(const std::string& packName) {
-    activeClickPack_ = packName;
+    {
+        std::lock_guard<std::mutex> gLock(guideAssetsMutex_);
+        activeClickPack_ = packName;
+    }
     auto clicksDir = AudioAttachmentService::getProjectRoot() / "assets" / "clicks";
     fs::path quarterPath;
     fs::path accentPath;
@@ -338,10 +351,11 @@ bool AudioEngine::selectClickPack(const std::string& packName) {
         quarterPath = fallbackPath;
     }
 
-    juce::AudioBuffer<float> quarterBuf = quarterPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(quarterPath.string(), currentSampleRate_);
-    juce::AudioBuffer<float> accentBuf = accentPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(accentPath.string(), currentSampleRate_);
-    juce::AudioBuffer<float> eighthBuf = eighthPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(eighthPath.string(), currentSampleRate_);
-    juce::AudioBuffer<float> sixteenthBuf = sixteenthPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(sixteenthPath.string(), currentSampleRate_);
+    const double targetSr = currentSampleRate_.load(std::memory_order_relaxed);
+    juce::AudioBuffer<float> quarterBuf = quarterPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(quarterPath.string(), targetSr);
+    juce::AudioBuffer<float> accentBuf = accentPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(accentPath.string(), targetSr);
+    juce::AudioBuffer<float> eighthBuf = eighthPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(eighthPath.string(), targetSr);
+    juce::AudioBuffer<float> sixteenthBuf = sixteenthPath.empty() ? juce::AudioBuffer<float>() : loadMonoAssetFile(sixteenthPath.string(), targetSr);
 
     if (quarterBuf.getNumSamples() == 0 && accentBuf.getNumSamples() > 0) quarterBuf = accentBuf;
     if (accentBuf.getNumSamples() == 0 && quarterBuf.getNumSamples() > 0) accentBuf = quarterBuf;
@@ -372,7 +386,7 @@ bool AudioEngine::selectVoicePack(const std::string& packName) {
             std::string stem = entry.path().stem().string();
             std::string word = matchCountInWordFromFilename(stem);
             if (!word.empty()) {
-                auto buf = loadMonoAssetFile(entry.path().string(), currentSampleRate_);
+                auto buf = loadMonoAssetFile(entry.path().string(), currentSampleRate_.load(std::memory_order_relaxed));
                 if (buf.getNumSamples() > 0) {
                     loadedWords[word] = std::move(buf);
                 }
@@ -451,9 +465,10 @@ void AudioEngine::syncSectionCuesForSections(const std::vector<SongSection>& sec
     }
 
     // Decode any uncached section cue files outside audioMutex_
+    const double targetSr = currentSampleRate_.load(std::memory_order_relaxed);
     std::map<std::string, juce::AudioBuffer<float>> newlyDecoded;
     for (const auto& key : keysToDecode) {
-        auto buf = loadMonoAssetFile(pathsToDecode[key], currentSampleRate_);
+        auto buf = loadMonoAssetFile(pathsToDecode[key], targetSr);
         if (buf.getNumSamples() > 0) {
             newlyDecoded[key] = std::move(buf);
         }
@@ -604,13 +619,14 @@ std::vector<float> AudioEngine::computeWaveformPeaks(const std::vector<LoadedTra
     return peaks;
 }
 
-std::shared_ptr<AudioEngine::CachedSongAudio> AudioEngine::decodeSongAudio(const Song& song) {
+std::shared_ptr<AudioEngine::CachedSongAudio> AudioEngine::decodeSongAudio(const Song& song, double targetSampleRate) {
     auto cached = std::make_shared<CachedSongAudio>();
     cached->songId = song.id.value_or(-1);
+    cached->sampleRate = (targetSampleRate > 1.0) ? targetSampleRate : 44100.0;
     cached->trackPaths = extractTrackPaths(song);
 
-    // Index stems & decode only Chunk 0 (~256 KB/stem) + 512-bin waveform peaks in parallel.
-    // Remaining chunks stream on demand from disk via streamerThread_, keeping RAM minimal.
+    // Index stems & decode only Chunk 0 (~256 KB/stem, resampled to device sample rate if needed)
+    // + 512-bin waveform peaks in parallel. Remaining chunks stream on demand via streamerThread_.
     std::vector<SongTrack> validTracks;
     for (const auto& t : song.tracks) {
         if (!t.filePath.empty()) {
@@ -628,8 +644,9 @@ std::shared_ptr<AudioEngine::CachedSongAudio> AudioEngine::decodeSongAudio(const
 
         for (size_t i = offset; i < batchEnd; ++i) {
             std::string path = validTracks[i].filePath;
-            futures.push_back(std::async(std::launch::async, [path]() {
-                return StreamingAudioTrack::createFromFile(path);
+            double sr = cached->sampleRate;
+            futures.push_back(std::async(std::launch::async, [path, sr]() {
+                return StreamingAudioTrack::createFromFile(path, sr);
             }));
         }
 
@@ -745,8 +762,11 @@ void AudioEngine::enqueueSongLoadLocked(const Song& song, bool highPriority) {
     auto targetPaths = extractTrackPaths(song);
 
     auto cacheIt = songAudioCache_.find(key);
-    if (cacheIt != songAudioCache_.end() && cacheIt->second && cacheIt->second->trackPaths == targetPaths) {
-        return; // Already cached
+    const double curSr = currentSampleRate_.load(std::memory_order_relaxed);
+    if (cacheIt != songAudioCache_.end() && cacheIt->second &&
+        cacheIt->second->trackPaths == targetPaths &&
+        std::abs(cacheIt->second->sampleRate - curSr) <= 1.0) {
+        return; // Already cached at current sample rate
     }
 
     // Remove duplicate queued entry for this (songId, arrangementId) key
@@ -777,7 +797,8 @@ void AudioEngine::loaderLoop() {
             gen = preloadGeneration_;
         }
 
-        auto decoded = decodeSongAudio(nextSong);
+        const double targetSr = currentSampleRate_.load(std::memory_order_relaxed);
+        auto decoded = decodeSongAudio(nextSong, targetSr);
         std::string nextKey = makeCacheKey(nextSong);
 
         bool shouldApplyToActive = false;
@@ -1075,8 +1096,9 @@ void AudioEngine::clearAllCachedAudio() {
         clearCrossfadeOutLocked();
         awaitingTransitionSwap_ = false;
         pendingTransitionTrigger_.store(0, std::memory_order_relaxed);
-        clickLoopStopBar_ = -1;
+        clickLoop_.reset();
         clickLoopEnabled_.store(true, std::memory_order_relaxed);
+        clickRestartQueued_.store(false, std::memory_order_relaxed);
         trackMuteUntilFrame_ = 0;
         isSectionStartCountInAtomic_.store(false, std::memory_order_relaxed);
         maxSongLengthFrames_ = 0;
@@ -1102,6 +1124,10 @@ void AudioEngine::clearAllCachedAudio() {
 void AudioEngine::loadSong(const Song& song) {
     const bool keepCrossfade = preserveCrossfadeOnNextLoad_.exchange(false, std::memory_order_acq_rel);
     fadeOutActive_.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> cacheLock(cacheMutex_);
+        lastLoadedSong_ = song;
+    }
     if (!keepCrossfade) {
         std::lock_guard<std::mutex> audioLock(audioMutex_);
         fadeOutElapsedSamples_ = 0;
@@ -1113,11 +1139,15 @@ void AudioEngine::loadSong(const Song& song) {
     auto newPaths = extractTrackPaths(song);
     std::string cacheKey = makeCacheKey(song);
 
-    // Fast path 1: Same song/arrangement and identical track files -> only update tempo/time signature/sections!
+    // Fast path 1: Same song/arrangement and identical track files at the current sample rate
+    const double curSr = currentSampleRate_.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> cacheLock(cacheMutex_);
+        auto cacheIt = !cacheKey.empty() ? songAudioCache_.find(cacheKey) : songAudioCache_.end();
+        const bool rateMatches = (cacheIt == songAudioCache_.end() || !cacheIt->second ||
+                                  std::abs(cacheIt->second->sampleRate - curSr) <= 1.0);
         if (!cacheKey.empty() && !activeCacheKey_.empty() &&
-            cacheKey == activeCacheKey_ && newPaths == activeTrackPaths_) {
+            cacheKey == activeCacheKey_ && newPaths == activeTrackPaths_ && rateMatches) {
             std::lock_guard<std::mutex> audioLock(audioMutex_);
             const auto* activeArr = song.findArrangement(song.activeArrangementId);
             int origTempo = (activeArr && activeArr->tempo > 0) ? activeArr->tempo : song.tempo;
@@ -1171,7 +1201,9 @@ void AudioEngine::loadSong(const Song& song) {
 
         if (!cacheKey.empty()) {
             auto it = songAudioCache_.find(cacheKey);
-            if (it != songAudioCache_.end() && it->second && it->second->trackPaths == newPaths) {
+            if (it != songAudioCache_.end() && it->second &&
+                it->second->trackPaths == newPaths &&
+                std::abs(it->second->sampleRate - curSr) <= 1.0) {
                 cachedHit = it->second;
             }
         }
@@ -1252,8 +1284,9 @@ void AudioEngine::setUseTracks(bool enabled) {
     if (!applySections) {
         clearQueuedSectionLocked();
         clearSelectedStartSectionLocked();
-        clickLoopStopBar_ = -1;
+        clickLoop_.reset();
         clickLoopEnabled_.store(true, std::memory_order_relaxed);
+        clickRestartQueued_.store(false, std::memory_order_relaxed);
         trackMuteUntilFrame_ = 0;
         isSectionStartCountInAtomic_.store(false, std::memory_order_relaxed);
     }
@@ -1340,21 +1373,29 @@ void AudioEngine::toggleClickLoop() {
 
 void AudioEngine::setClickLoopEnabled(bool enabled) {
     std::lock_guard<std::mutex> lock(audioMutex_);
-    clickLoopEnabled_.store(enabled, std::memory_order_relaxed);
-    if (enabled) {
-        clickLoopStopBar_ = -1;
+    const bool playing = isPlaying_.load();
+    const int curBar = playing
+                           ? static_cast<int>(std::floor(std::max(0.0, metronome_.getBarForFrame(metronome_.getMetronomeFrame()))))
+                           : 0;
+    clickLoop_.setLoopEnabled(enabled, playing, curBar);
+    clickLoopEnabled_.store(clickLoop_.loopEnabled, std::memory_order_relaxed);
+    clickRestartQueued_.store(clickLoop_.restartQueued, std::memory_order_relaxed);
+}
+
+void AudioEngine::toggleClickRestart() {
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    if (fadeOutActive_.load(std::memory_order_relaxed)) {
         return;
     }
-
-    if (isPlaying_.load()) {
-        const double curBars = metronome_.getBarForFrame(metronome_.getMetronomeFrame());
-        const int curBar = static_cast<int>(std::floor(std::max(0.0, curBars)));
-        // If deselected during the 2-bar count-in, play the 1 main bar and end at bar 3;
-        // if deselected during the looped bar (bar >= 2), stop cleanly at the end of the current bar.
-        clickLoopStopBar_ = (curBar < 2) ? 3 : (curBar + 1);
-    } else {
-        clickLoopStopBar_ = 3;
-    }
+    const bool playing = isPlaying_.load();
+    const bool paused = isPaused_.load();
+    const bool structured = isStructuredTimelineMode();
+    const int curBar = playing
+                           ? static_cast<int>(std::floor(std::max(0.0, metronome_.getBarForFrame(metronome_.getMetronomeFrame()))))
+                           : 0;
+    clickLoop_.toggleBackToStart(playing, paused, structured, curBar);
+    clickLoopEnabled_.store(clickLoop_.loopEnabled, std::memory_order_relaxed);
+    clickRestartQueued_.store(clickLoop_.restartQueued, std::memory_order_relaxed);
 }
 
 void AudioEngine::toggleRepeatCurrentSection() {
@@ -1514,7 +1555,8 @@ void AudioEngine::preparePitchShiftersLocked() {
         return;
     }
 
-    const float sr = static_cast<float>(currentSampleRate_ > 0.0 ? currentSampleRate_ : 44100.0);
+    const double curSr = currentSampleRate_.load(std::memory_order_relaxed);
+    const float sr = static_cast<float>(curSr > 0.0 ? curSr : 44100.0);
     const int numOutCh = std::max(1, currentOutputChannels_.load(std::memory_order_relaxed));
 
     std::vector<StretchBusKey> neededKeys;
@@ -1596,7 +1638,9 @@ void AudioEngine::play() {
         // If a later starting section was pre-selected while stopped, begin 1 bar earlier
         // for that section's normal bar count-in ("<Section>, 2, 3, 4") with tracks muted until Beat 1.
         const bool structuredTimeline = isStructuredTimelineMode();
-        clickLoopStopBar_ = (!structuredTimeline && !clickLoopEnabled_.load(std::memory_order_relaxed)) ? 3 : -1;
+        clickLoop_.onPlayStarted(structuredTimeline);
+        clickLoopEnabled_.store(clickLoop_.loopEnabled, std::memory_order_relaxed);
+        clickRestartQueued_.store(false, std::memory_order_relaxed);
         if (structuredTimeline && selectedStartSectionIndex_ >= 0 &&
             selectedStartSectionIndex_ < static_cast<int>(sectionSpans_.size())) {
             const auto& targetSpan = sectionSpans_[static_cast<size_t>(selectedStartSectionIndex_)];
@@ -1663,8 +1707,9 @@ void AudioEngine::stop() {
         clearQueuedSectionLocked();
         clearCrossfadeOutLocked();
         awaitingTransitionSwap_ = false;
-        clickLoopStopBar_ = -1;
+        clickLoop_.reset();
         clickLoopEnabled_.store(true, std::memory_order_relaxed);
+        clickRestartQueued_.store(false, std::memory_order_relaxed);
         trackMuteUntilFrame_ = 0;
         isSectionStartCountInAtomic_.store(false, std::memory_order_relaxed);
         if (!wasPlaying) {
@@ -1707,10 +1752,14 @@ void AudioEngine::fadeOutAndStop(double durationSeconds) {
     const double clampedSec = std::clamp(durationSeconds, 0.1, 10.0);
     {
         std::lock_guard<std::mutex> lock(audioMutex_);
-        const double sr = (currentSampleRate_ > 0.0) ? currentSampleRate_ : 44100.0;
+        const double curSr = currentSampleRate_.load(std::memory_order_relaxed);
+        const double sr = (curSr > 0.0) ? curSr : 44100.0;
         fadeOutElapsedSamples_ = 0;
         fadeOutTotalSamples_ = std::max<int64_t>(1, static_cast<int64_t>(std::llround(clampedSec * sr)));
         clearQueuedSectionLocked();
+        clickLoop_.restartQueued = false;
+        clickLoop_.restartBoundaryBar = -1;
+        clickRestartQueued_.store(false, std::memory_order_relaxed);
         fadeOutActive_.store(true, std::memory_order_release);
     }
 }
@@ -1741,6 +1790,39 @@ void AudioEngine::setGuideGain(float gain) {
     metronome_.setGuideGain(gain);
 }
 
+std::vector<AudioEngine::AnnouncementVoiceOption> AudioEngine::getAvailableAnnouncementVoices() {
+    return {
+        { "af_heart",    "Heart (US Female - Neural)" },
+        { "af_bella",    "Bella (US Female - Neural)" },
+        { "af_nova",     "Nova (US Female - Neural)" },
+        { "af_sky",      "Sky (US Female - Neural)" },
+        { "bf_emma",     "Emma (UK Female - Neural)" },
+        { "bf_isabella", "Isabella (UK Female - Neural)" },
+        { "am_michael",  "Michael (US Male - Neural)" },
+        { "bm_george",   "George (UK Male - Neural)" },
+        { "system",      "System Voice (macOS)" }
+    };
+}
+
+bool AudioEngine::isNeuralTtsAvailable() {
+    const auto root = AudioAttachmentService::getProjectRoot();
+    std::error_code ec;
+    return fs::exists(root / ".venv" / "bin" / "python3", ec) &&
+           fs::exists(root / "scripts" / "kokoro_tts_worker.py", ec) &&
+           fs::exists(root / "assets" / "tts" / "kokoro-v1.0.int8.onnx", ec) &&
+           fs::exists(root / "assets" / "tts" / "voices-v1.0.bin", ec);
+}
+
+void AudioEngine::setAnnouncementVoice(const std::string& voiceId) {
+    std::lock_guard<std::mutex> tLock(ttsMutex_);
+    announcementVoice_ = voiceId.empty() ? "af_heart" : voiceId;
+}
+
+std::string AudioEngine::getAnnouncementVoice() const {
+    std::lock_guard<std::mutex> tLock(ttsMutex_);
+    return announcementVoice_;
+}
+
 void AudioEngine::stopGuideAnnouncement() {
     guideAnnouncementGen_.fetch_add(1, std::memory_order_acq_rel);
     guideAnnouncementActive_.store(false, std::memory_order_release);
@@ -1762,20 +1844,22 @@ void AudioEngine::speakGuideText(const std::string& text) {
     std::string cleaned = text.substr(first, last - first + 1);
     if (cleaned.empty()) return;
 
-    const int sr = std::clamp(static_cast<int>(std::llround(currentSampleRate_ > 0.0 ? currentSampleRate_ : 44100.0)),
+    const double curSr = currentSampleRate_.load(std::memory_order_relaxed);
+    const int sr = std::clamp(static_cast<int>(std::llround(curSr > 0.0 ? curSr : 44100.0)),
                               16000, 192000);
-    const std::string cacheKey = cleaned + "@" + std::to_string(sr);
     const uint64_t gen = guideAnnouncementGen_.fetch_add(1, std::memory_order_acq_rel) + 1;
 
     std::shared_ptr<const juce::AudioBuffer<float>> cachedBuf;
     {
         std::lock_guard<std::mutex> tLock(ttsMutex_);
+        const std::string voice = announcementVoice_.empty() ? "af_heart" : announcementVoice_;
+        const std::string cacheKey = voice + ":" + cleaned + "@" + std::to_string(sr);
         auto it = ttsCache_.find(cacheKey);
         if (it != ttsCache_.end() && it->second && it->second->getNumSamples() > 0) {
             cachedBuf = it->second;
             pendingTtsJob_.reset();
         } else {
-            pendingTtsJob_ = PendingTtsJob{ gen, cleaned, sr };
+            pendingTtsJob_ = PendingTtsJob{ gen, voice, cleaned, sr };
         }
     }
 
@@ -1792,7 +1876,74 @@ void AudioEngine::speakGuideText(const std::string& text) {
     ttsCv_.notify_one();
 }
 
-std::shared_ptr<const juce::AudioBuffer<float>> AudioEngine::synthesizeTtsMonoBuffer(const std::string& text, int sampleRate) {
+std::shared_ptr<const juce::AudioBuffer<float>> AudioEngine::loadAndNormalizeGuideWav(
+    const std::string& wavPath,
+    int targetSampleRate) const {
+    auto mono = loadMonoAssetFile(wavPath, static_cast<double>(targetSampleRate));
+    const int rawSamples = mono.getNumSamples();
+    if (rawSamples <= 0 || mono.getNumChannels() <= 0) {
+        return nullptr;
+    }
+
+    // Trim leading & trailing silence (< -50 dB) so playback starts crisply
+    const float* m = mono.getReadPointer(0);
+    constexpr float kThresh = 0.003f;
+    int startIdx = 0;
+    while (startIdx < rawSamples && std::abs(m[startIdx]) < kThresh) ++startIdx;
+    int endIdx = rawSamples - 1;
+    while (endIdx > startIdx && std::abs(m[endIdx]) < kThresh) --endIdx;
+    if (startIdx >= endIdx) {
+        return nullptr;
+    }
+
+    const int pad = std::min(256, targetSampleRate / 100);
+    startIdx = std::max(0, startIdx - pad);
+    endIdx = std::min(rawSamples - 1, endIdx + pad);
+    const int trimmedLen = endIdx - startIdx + 1;
+
+    auto out = std::make_shared<juce::AudioBuffer<float>>(1, trimmedLen);
+    out->copyFrom(0, 0, mono, 0, startIdx, trimmedLen);
+
+    // Match perceived loudness to the guide voice cues (~ -20 dBFS active RMS, peak capped at -6 dBFS)
+    float peak = 0.0f;
+    double sumSq = 0.0;
+    int activeCount = 0;
+    float* dst = out->getWritePointer(0);
+    for (int i = 0; i < trimmedLen; ++i) {
+        const float a = std::abs(dst[i]);
+        peak = std::max(peak, a);
+        if (a > 0.01f) {
+            sumSq += static_cast<double>(dst[i]) * static_cast<double>(dst[i]);
+            ++activeCount;
+        }
+    }
+    if (peak > 1e-4f) {
+        constexpr float kTargetActiveRms = 0.10f; // -20.0 dBFS (matches playback_female cues)
+        constexpr float kMaxPeak = 0.50f;         //  -6.0 dBFS peak ceiling
+        float gain = kMaxPeak / peak;
+        if (activeCount > 0) {
+            const float activeRms = static_cast<float>(std::sqrt(sumSq / static_cast<double>(activeCount)));
+            if (activeRms > 1e-4f) {
+                gain = std::min(kTargetActiveRms / activeRms, kMaxPeak / peak);
+            }
+        }
+        gain = std::clamp(gain, 0.15f, 3.0f);
+        juce::FloatVectorOperations::multiply(dst, gain, trimmedLen);
+    }
+
+    // Tiny fade-in/out to prevent clicks
+    const int fadeLen = std::min(128, trimmedLen / 4);
+    for (int i = 0; i < fadeLen; ++i) {
+        const float g = static_cast<float>(i) / static_cast<float>(fadeLen);
+        dst[i] *= g;
+        dst[trimmedLen - 1 - i] *= g;
+    }
+    return out;
+}
+
+std::shared_ptr<const juce::AudioBuffer<float>> AudioEngine::synthesizeSystemTtsMonoBuffer(
+    const std::string& text,
+    int sampleRate) const {
 #if JUCE_MAC
     const auto nowNs = std::chrono::steady_clock::now().time_since_epoch().count();
     auto tmpDir = fs::path(juce::File::getSpecialLocation(juce::File::tempDirectory).getFullPathName().toStdString());
@@ -1831,78 +1982,8 @@ std::shared_ptr<const juce::AudioBuffer<float>> AudioEngine::synthesizeTtsMonoBu
         return nullptr;
     }
 
-    juce::File wavFile(wavPath.string());
-    if (!wavFile.existsAsFile() || wavFile.getSize() <= 44) {
-        cleanup();
-        return nullptr;
-    }
-
-    juce::AudioFormatManager fm;
-    fm.registerBasicFormats();
-    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(wavFile));
-    if (!reader || reader->lengthInSamples <= 0 || reader->numChannels == 0) {
-        cleanup();
-        return nullptr;
-    }
-
-    const int rawSamples = static_cast<int>(std::min<int64_t>(reader->lengthInSamples, static_cast<int64_t>(sampleRate) * 15));
-    const int rawCh = static_cast<int>(reader->numChannels);
-    juce::AudioBuffer<float> rawBuf(rawCh, rawSamples);
-    rawBuf.clear();
-    reader->read(&rawBuf, 0, rawSamples, 0, true, rawCh >= 2);
-    reader.reset();
+    auto out = loadAndNormalizeGuideWav(wavPath.string(), sampleRate);
     cleanup();
-
-    // Downmix to mono if needed
-    juce::AudioBuffer<float> mono(1, rawSamples);
-    if (rawCh >= 2) {
-        const float* L = rawBuf.getReadPointer(0);
-        const float* R = rawBuf.getReadPointer(1);
-        float* dst = mono.getWritePointer(0);
-        for (int i = 0; i < rawSamples; ++i) {
-            dst[i] = 0.5f * (L[i] + R[i]);
-        }
-    } else {
-        mono.copyFrom(0, 0, rawBuf, 0, 0, rawSamples);
-    }
-
-    // Trim leading & trailing silence (< -50 dB) so playback starts crisply
-    const float* m = mono.getReadPointer(0);
-    constexpr float kThresh = 0.003f;
-    int startIdx = 0;
-    while (startIdx < rawSamples && std::abs(m[startIdx]) < kThresh) ++startIdx;
-    int endIdx = rawSamples - 1;
-    while (endIdx > startIdx && std::abs(m[endIdx]) < kThresh) --endIdx;
-    if (startIdx >= endIdx) {
-        return nullptr;
-    }
-
-    const int pad = std::min(256, sampleRate / 100);
-    startIdx = std::max(0, startIdx - pad);
-    endIdx = std::min(rawSamples - 1, endIdx + pad);
-    const int trimmedLen = endIdx - startIdx + 1;
-
-    auto out = std::make_shared<juce::AudioBuffer<float>>(1, trimmedLen);
-    out->copyFrom(0, 0, mono, 0, startIdx, trimmedLen);
-
-    // Normalize peak to 0.82 so TTS matches the guide voice pack level cleanly
-    float peak = 0.0f;
-    float* dst = out->getWritePointer(0);
-    for (int i = 0; i < trimmedLen; ++i) {
-        peak = std::max(peak, std::abs(dst[i]));
-    }
-    if (peak > 1e-4f) {
-        const float norm = std::min(4.0f, 0.82f / peak);
-        juce::FloatVectorOperations::multiply(dst, norm, trimmedLen);
-    }
-
-    // Tiny fade-in/out to prevent clicks
-    const int fadeLen = std::min(128, trimmedLen / 4);
-    for (int i = 0; i < fadeLen; ++i) {
-        const float g = static_cast<float>(i) / static_cast<float>(fadeLen);
-        dst[i] *= g;
-        dst[trimmedLen - 1 - i] *= g;
-    }
     return out;
 #else
     (void)text;
@@ -1911,8 +1992,205 @@ std::shared_ptr<const juce::AudioBuffer<float>> AudioEngine::synthesizeTtsMonoBu
 #endif
 }
 
+namespace {
+
+std::string fnv1a64Hex(const std::string& input) {
+    uint64_t h = 14695981039346656037ULL;
+    for (unsigned char c : input) {
+        h ^= static_cast<uint64_t>(c);
+        h *= 1099511628211ULL;
+    }
+    std::ostringstream oss;
+    oss << std::hex << std::setw(16) << std::setfill('0') << h;
+    return oss.str();
+}
+
+std::string sanitizeVoiceFilePrefix(const std::string& voice) {
+    std::string out;
+    out.reserve(voice.size());
+    for (unsigned char c : voice) {
+        if (std::isalnum(c) || c == '_' || c == '-') out.push_back(static_cast<char>(c));
+    }
+    return out.empty() ? "voice" : out;
+}
+
+#if JUCE_MAC || JUCE_LINUX
+struct PersistentKokoroWorker {
+    pid_t pid = -1;
+    int writeFd = -1;
+    int readFd = -1;
+    std::string readBuf;
+
+    ~PersistentKokoroWorker() { stop(); }
+
+    void stop() {
+        if (writeFd >= 0) {
+            const char quitCmd[] = "QUIT\n";
+            (void)::write(writeFd, quitCmd, sizeof(quitCmd) - 1);
+            ::close(writeFd);
+            writeFd = -1;
+        }
+        if (readFd >= 0) {
+            ::close(readFd);
+            readFd = -1;
+        }
+        readBuf.clear();
+        if (pid > 0) {
+            int status = 0;
+            bool exited = false;
+            for (int i = 0; i < 15; ++i) {
+                pid_t r = ::waitpid(pid, &status, WNOHANG);
+                if (r == pid || r < 0) { exited = true; break; }
+                ::usleep(20000);
+            }
+            if (!exited) {
+                ::kill(pid, SIGTERM);
+                ::waitpid(pid, &status, 0);
+            }
+            pid = -1;
+        }
+    }
+
+    bool readLineWithTimeout(std::string& outLine, int timeoutMs) {
+        outLine.clear();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        while (true) {
+            auto nl = readBuf.find('\n');
+            if (nl != std::string::npos) {
+                outLine = readBuf.substr(0, nl);
+                if (!outLine.empty() && outLine.back() == '\r') outLine.pop_back();
+                readBuf.erase(0, nl + 1);
+                return true;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline || readFd < 0) return false;
+            const int remMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+            struct pollfd pfd { readFd, POLLIN, 0 };
+            int pr = ::poll(&pfd, 1, std::max(1, remMs));
+            if (pr <= 0) return false;
+            char buf[512];
+            ssize_t n = ::read(readFd, buf, sizeof(buf));
+            if (n <= 0) return false;
+            readBuf.append(buf, static_cast<size_t>(n));
+        }
+    }
+
+    bool ensureRunning(const fs::path& pythonPath,
+                       const fs::path& scriptPath,
+                       const fs::path& modelPath,
+                       const fs::path& voicesPath) {
+        if (pid > 0) {
+            int status = 0;
+            if (::waitpid(pid, &status, WNOHANG) == 0) {
+                return true;
+            }
+            pid = -1;
+            stop();
+        }
+
+        int inPipe[2] = { -1, -1 };
+        int outPipe[2] = { -1, -1 };
+        if (::pipe(inPipe) != 0) return false;
+        if (::pipe(outPipe) != 0) {
+            ::close(inPipe[0]);
+            ::close(inPipe[1]);
+            return false;
+        }
+
+        pid_t child = ::fork();
+        if (child < 0) {
+            ::close(inPipe[0]); ::close(inPipe[1]);
+            ::close(outPipe[0]); ::close(outPipe[1]);
+            return false;
+        }
+
+        if (child == 0) {
+            ::dup2(inPipe[0], STDIN_FILENO);
+            ::dup2(outPipe[1], STDOUT_FILENO);
+            int devNull = ::open("/dev/null", O_WRONLY);
+            if (devNull >= 0) {
+                ::dup2(devNull, STDERR_FILENO);
+                ::close(devNull);
+            }
+            ::close(inPipe[0]); ::close(inPipe[1]);
+            ::close(outPipe[0]); ::close(outPipe[1]);
+
+            std::string pyStr = pythonPath.string();
+            std::string scStr = scriptPath.string();
+            std::string moStr = modelPath.string();
+            std::string voStr = voicesPath.string();
+            char* const argv[] = {
+                pyStr.data(),
+                const_cast<char*>("-u"),
+                scStr.data(),
+                const_cast<char*>("--model"),
+                moStr.data(),
+                const_cast<char*>("--voices"),
+                voStr.data(),
+                nullptr
+            };
+            ::execv(pyStr.c_str(), argv);
+            ::_exit(127);
+        }
+
+        ::close(inPipe[0]);
+        ::close(outPipe[1]);
+        pid = child;
+        writeFd = inPipe[1];
+        readFd = outPipe[0];
+        ::fcntl(readFd, F_SETFL, O_NONBLOCK);
+
+        std::string readyLine;
+        if (!readLineWithTimeout(readyLine, 20000) || readyLine != "READY") {
+            stop();
+            return false;
+        }
+        return true;
+    }
+
+    bool synthesizeToWav(const std::string& voice, const std::string& outWavPath, const std::string& text) {
+        if (pid <= 0 || writeFd < 0 || readFd < 0) return false;
+        std::string safeText = text;
+        for (char& ch : safeText) {
+            if (ch == '\t' || ch == '\r' || ch == '\n') ch = ' ';
+        }
+        std::string req = voice + "\t" + outWavPath + "\t" + safeText + "\n";
+        const char* p = req.data();
+        size_t rem = req.size();
+        while (rem > 0) {
+            ssize_t w = ::write(writeFd, p, rem);
+            if (w <= 0) {
+                stop();
+                return false;
+            }
+            p += w;
+            rem -= static_cast<size_t>(w);
+        }
+
+        std::string reply;
+        if (!readLineWithTimeout(reply, 12000) || reply != "OK") {
+            stop();
+            return false;
+        }
+        return true;
+    }
+};
+#endif
+
+} // namespace
+
 void AudioEngine::ttsWorkerLoop() {
     constexpr size_t kMaxCachedTtsItems = 64;
+#if JUCE_MAC || JUCE_LINUX
+    PersistentKokoroWorker kokoroWorker;
+#endif
+    const auto projectRoot = AudioAttachmentService::getProjectRoot();
+    const fs::path pythonPath = projectRoot / ".venv" / "bin" / "python3";
+    const fs::path scriptPath = projectRoot / "scripts" / "kokoro_tts_worker.py";
+    const fs::path modelPath = projectRoot / "assets" / "tts" / "kokoro-v1.0.int8.onnx";
+    const fs::path voicesPath = projectRoot / "assets" / "tts" / "voices-v1.0.bin";
+    const fs::path diskCacheDir = projectRoot / "tts_cache";
+
     while (true) {
         PendingTtsJob job;
         {
@@ -1928,12 +2206,37 @@ void AudioEngine::ttsWorkerLoop() {
             continue;
         }
 
-        auto buf = synthesizeTtsMonoBuffer(job.text, job.sampleRate);
+        std::shared_ptr<const juce::AudioBuffer<float>> buf;
+
+        // 1. Try local Kokoro neural TTS (checking persistent disk cache first -> <1ms, zero Python launch!)
+        if (job.voice != "system") {
+            const fs::path cachedWav = diskCacheDir / (sanitizeVoiceFilePrefix(job.voice) + "_" + fnv1a64Hex(job.text) + ".wav");
+            std::error_code ec;
+            if (fs::exists(cachedWav, ec) && fs::file_size(cachedWav, ec) > 44) {
+                buf = loadAndNormalizeGuideWav(cachedWav.string(), job.sampleRate);
+            }
+#if JUCE_MAC || JUCE_LINUX
+            if (!buf && fs::exists(pythonPath, ec) && fs::exists(scriptPath, ec) &&
+                fs::exists(modelPath, ec) && fs::exists(voicesPath, ec)) {
+                fs::create_directories(diskCacheDir, ec);
+                if (kokoroWorker.ensureRunning(pythonPath, scriptPath, modelPath, voicesPath) &&
+                    kokoroWorker.synthesizeToWav(job.voice, cachedWav.string(), job.text)) {
+                    buf = loadAndNormalizeGuideWav(cachedWav.string(), job.sampleRate);
+                }
+            }
+#endif
+        }
+
+        // 2. Graceful fallback to macOS system voice
+        if (!buf) {
+            buf = synthesizeSystemTtsMonoBuffer(job.text, job.sampleRate);
+        }
+
         if (!buf || buf->getNumSamples() <= 0) {
             continue;
         }
 
-        const std::string cacheKey = job.text + "@" + std::to_string(job.sampleRate);
+        const std::string cacheKey = job.voice + ":" + job.text + "@" + std::to_string(job.sampleRate);
         {
             std::lock_guard<std::mutex> lock(ttsMutex_);
             if (ttsShuttingDown_) break;
@@ -2117,8 +2420,13 @@ std::vector<float> AudioEngine::getOutputPeaks() {
 
 void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     int chCount = currentOutputChannels_.load(std::memory_order_relaxed);
+    const double prevSampleRate = currentSampleRate_.load(std::memory_order_relaxed);
+    double newSampleRate = prevSampleRate;
     if (device) {
-        currentSampleRate_ = device->getCurrentSampleRate();
+        newSampleRate = device->getCurrentSampleRate();
+        if (newSampleRate > 1.0) {
+            currentSampleRate_.store(newSampleRate, std::memory_order_relaxed);
+        }
         int activeCh = device->getActiveOutputChannels().countNumberOfSetBits();
         if (activeCh <= 0) {
             activeCh = device->getOutputChannelNames().size();
@@ -2126,7 +2434,9 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
         chCount = std::max(1, activeCh);
         currentOutputChannels_.store(chCount, std::memory_order_relaxed);
     }
-    metronome_.prepare(currentSampleRate_);
+    const bool sampleRateChanged = std::abs(newSampleRate - prevSampleRate) > 1.0;
+
+    metronome_.prepare(currentSampleRate_.load(std::memory_order_relaxed));
     renderScratchBuffer_.setSize(chCount, 2048);
     crossfadeScratchBuffer_.setSize(chCount, 2048);
     {
@@ -2139,6 +2449,37 @@ void AudioEngine::audioDeviceAboutToStart(juce::AudioIODevice* device) {
     activePeakChannels_.store(std::min(chCount, kMaxMeterChannels), std::memory_order_relaxed);
     for (auto& p : outputPeaksAtomic_) {
         p.store(0.0f, std::memory_order_relaxed);
+    }
+
+    // If the audio device sample rate changed (e.g. switching between 44.1 kHz interface and 48 kHz AirPods),
+    // re-resample cached stems and click/guide packs so backing tracks stay 100% locked to the click.
+    if (sampleRateChanged) {
+        std::optional<Song> songToReload;
+        {
+            std::lock_guard<std::mutex> cLock(cacheMutex_);
+            preloadGeneration_++;
+            preloadQueue_.clear();
+            songAudioCache_.clear();
+            activeCacheKey_.clear();
+            activeTrackPaths_.clear();
+            songToReload = lastLoadedSong_;
+        }
+        std::string clickPackToReload;
+        std::string voicePackToReload;
+        {
+            std::lock_guard<std::mutex> gLock(guideAssetsMutex_);
+            clickPackToReload = activeClickPack_;
+            voicePackToReload = activeVoicePack_;
+        }
+        if (!clickPackToReload.empty()) {
+            selectClickPack(clickPackToReload);
+        }
+        if (!voicePackToReload.empty()) {
+            selectVoicePack(voicePackToReload);
+        }
+        if (songToReload.has_value()) {
+            loadSong(*songToReload);
+        }
     }
 }
 
@@ -2884,12 +3225,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
                         }
                     }
 
+                    bool restartClickAfterSegment = false;
+                    if (!structuredTimeline && clickLoop_.restartQueued && clickLoop_.restartBoundaryBar > 0) {
+                        const int64_t restartFrame = metronome_.getFrameForBar(static_cast<double>(clickLoop_.restartBoundaryBar));
+                        if (curFrame >= restartFrame) {
+                            metronome_.jumpToFrame(0);
+                            clickLoop_.onRestartExecuted();
+                            clickLoopEnabled_.store(clickLoop_.loopEnabled, std::memory_order_relaxed);
+                            clickRestartQueued_.store(false, std::memory_order_relaxed);
+                            continue;
+                        }
+                        if (curFrame + segmentSamples >= restartFrame) {
+                            segmentSamples = static_cast<int>(restartFrame - curFrame);
+                            restartClickAfterSegment = true;
+                        }
+                    }
+
                     bool stopClickAfterSegment = false;
-                    if (!structuredTimeline && clickLoopStopBar_ > 0) {
-                        const int64_t stopFrame = metronome_.getFrameForBar(static_cast<double>(clickLoopStopBar_));
+                    if (!structuredTimeline && !restartClickAfterSegment && clickLoop_.stopBar > 0) {
+                        const int64_t stopFrame = metronome_.getFrameForBar(static_cast<double>(clickLoop_.stopBar));
                         if (curFrame >= stopFrame) {
-                            clickLoopStopBar_ = -1;
+                            clickLoop_.reset();
                             clickLoopEnabled_.store(true, std::memory_order_relaxed);
+                            clickRestartQueued_.store(false, std::memory_order_relaxed);
                             metronome_.reset();
                             if (hasNextSong && (transitionMode == SongTransitionMode::AutoplayNextSong ||
                                                 transitionMode == SongTransitionMode::Crossfade)) {
@@ -2916,9 +3274,18 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
                     renderSegmentLocked(rendered, segmentSamples, numOutputChannels, playTracks, audioStartFrame);
                     rendered += segmentSamples;
 
+                    if (restartClickAfterSegment) {
+                        metronome_.jumpToFrame(0);
+                        clickLoop_.onRestartExecuted();
+                        clickLoopEnabled_.store(clickLoop_.loopEnabled, std::memory_order_relaxed);
+                        clickRestartQueued_.store(false, std::memory_order_relaxed);
+                        continue;
+                    }
+
                     if (stopClickAfterSegment) {
-                        clickLoopStopBar_ = -1;
+                        clickLoop_.reset();
                         clickLoopEnabled_.store(true, std::memory_order_relaxed);
+                        clickRestartQueued_.store(false, std::memory_order_relaxed);
                         metronome_.reset();
                         if (hasNextSong && (transitionMode == SongTransitionMode::AutoplayNextSong ||
                                             transitionMode == SongTransitionMode::Crossfade)) {
@@ -3008,8 +3375,9 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
                     clearQueuedSectionLocked();
                     clearCrossfadeOutLocked();
                     awaitingTransitionSwap_ = false;
-                    clickLoopStopBar_ = -1;
+                    clickLoop_.reset();
                     clickLoopEnabled_.store(true, std::memory_order_relaxed);
+                    clickRestartQueued_.store(false, std::memory_order_relaxed);
                     trackMuteUntilFrame_ = 0;
                     isSectionStartCountInAtomic_.store(false, std::memory_order_relaxed);
                     trackJumpFadeSamplesRemaining_ = 0;

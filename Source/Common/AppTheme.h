@@ -53,6 +53,8 @@ public:
                       int buttonX, int buttonY, int buttonW, int buttonH,
                       juce::ComboBox& box) override;
 
+    void positionComboBoxText(juce::ComboBox& box, juce::Label& label) override;
+
     void drawTableHeaderColumn(juce::Graphics& g, juce::TableHeaderComponent& header,
                                const juce::String& columnName, int columnId,
                                int width, int height, bool isMouseOver,

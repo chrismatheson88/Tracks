@@ -161,7 +161,8 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
                                            int selectedStartSectionIndex,
                                            bool isSectionStartCountIn,
                                            bool clickLoopEnabled,
-                                           bool isFadingOut) {
+                                           bool isFadingOut,
+                                           bool clickRestartQueued) {
     const double clampedBars = std::max(0.0, totalBarsElapsed);
     const int clampedBeatsPerBar = std::max(1, beatsPerBar);
     const double clampedDurBars = std::max(0.0, trackDurationBars);
@@ -186,6 +187,7 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
         isSectionStartCountIn != isSectionStartCountIn_ ||
         clickLoopEnabled != clickLoopEnabled_ ||
         isFadingOut != isFadingOut_ ||
+        clickRestartQueued != clickRestartQueued_ ||
         std::abs(clampedDurBars - trackDurationBars_) > 1e-4 ||
         clampedBarCount != trackBarCount_;
 
@@ -206,6 +208,7 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
     isSectionStartCountIn_ = isSectionStartCountIn;
     clickLoopEnabled_ = clickLoopEnabled;
     isFadingOut_ = isFadingOut;
+    clickRestartQueued_ = clickRestartQueued;
     trackDurationBars_ = clampedDurBars;
     trackBarCount_ = clampedBarCount;
     if (hoveredSectionIndex_ >= 0) {
@@ -313,9 +316,14 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                          juce::String(targetSec.name).toUpperCase();
             statusCol = AppTheme::warningAmber;
         } else if (inPrependedCountIn) {
-            statusText = (isPaused_ ? "PAUSED - COUNT-IN " : "COUNT-IN - BAR ") +
-                         juce::String(std::min(2, barIndex + 1)) + "/2";
-            statusCol = AppTheme::warningAmber;
+            if (!waveformMode && clickRestartQueued_) {
+                statusText = "RESTARTING - COUNT-IN BAR " + juce::String(std::min(2, barIndex + 1)) + "/2";
+                statusCol = queuedAccent;
+            } else {
+                statusText = (isPaused_ ? "PAUSED - COUNT-IN " : "COUNT-IN - BAR ") +
+                             juce::String(std::min(2, barIndex + 1)) + "/2";
+                statusCol = AppTheme::warningAmber;
+            }
         } else if (waveformMode && activeSectionIdx >= 0) {
             const auto& sec = sections_[static_cast<size_t>(activeSectionIdx)];
             int audioBarNum = std::min(trackBarCount_, std::max(1, barIndex - prependedCountBars + 1));
@@ -332,10 +340,15 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                              juce::String(songBarNum) + " / " + juce::String(trackBarCount_);
                 statusCol = isPaused_ ? AppTheme::warningAmber : AppTheme::accentGreen;
             } else {
-                const bool endingBar = !clickLoopEnabled_;
-                statusText = (isPaused_ ? "PAUSED - BAR " : (endingBar ? "ENDING - BAR " : "BAR ")) +
+                const bool restartingBar = clickRestartQueued_;
+                const bool endingBar = !restartingBar && !clickLoopEnabled_;
+                statusText = (isPaused_ ? "PAUSED - BAR "
+                                        : (restartingBar ? "RESTARTING - BAR "
+                                                         : (endingBar ? "ENDING - BAR " : "BAR "))) +
                              juce::String(songBarNum);
-                statusCol = (isPaused_ || endingBar) ? AppTheme::warningAmber : AppTheme::accentGreen;
+                statusCol = isPaused_ ? AppTheme::warningAmber
+                                      : (restartingBar ? queuedAccent
+                                                       : (endingBar ? AppTheme::warningAmber : AppTheme::accentGreen));
             }
         }
     } else {
@@ -484,7 +497,7 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 const float bx = contentX + static_cast<float>(b) * countInBarW;
                 for (int beat = 0; beat < beatsPerBar_; ++beat) {
                     const float beatX = bx + static_cast<float>(beat) * countInBeatW;
-                    const bool isAccentBeat = isCompound_ ? (beat % 3 == 0) : (beat == 0);
+                    const bool isAccentBeat = (isCompound_ && beatsPerBar_ != 6) ? (beat % 3 == 0) : (beat == 0);
                     if (b == activeCountInBar && beat == activeBeatInBar) {
                         g.setColour(AppTheme::warningAmber.withAlpha(0.24f));
                         g.fillRect(beatX + 0.5f, trackY + 1.0f, std::max(0.0f, countInBeatW - 1.0f), trackH - 2.0f);
@@ -775,14 +788,24 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
         const float secLabelH = 12.0f;
         g.setFont(juce::Font(9.5f, juce::Font::bold));
 
-        const char* barTitles[3] = { "COUNT-IN 1", "COUNT-IN 2", clickLoopEnabled_ ? "LOOP" : "FINAL BAR" };
+        const char* barTitles[3] = {
+            "COUNT-IN 1",
+            "COUNT-IN 2",
+            clickRestartQueued_ ? "RESTART" : (clickLoopEnabled_ ? "LOOP" : "FINAL BAR")
+        };
         for (int b = 0; b < 3; ++b) {
             float bx = contentX + static_cast<float>(b) * barW;
             juce::Colour lblCol = AppTheme::textMuted.withAlpha(0.75f);
             if (activeVisualBar == b) {
-                lblCol = (b < 2 || !clickLoopEnabled_) ? AppTheme::warningAmber : AppTheme::accentGreen;
+                if (clickRestartQueued_) {
+                    lblCol = queuedAccent;
+                } else {
+                    lblCol = (b < 2 || !clickLoopEnabled_) ? AppTheme::warningAmber : AppTheme::accentGreen;
+                }
             } else if (b == 2) {
-                lblCol = clickLoopEnabled_ ? AppTheme::primaryBlue.brighter(0.2f) : AppTheme::warningAmber.withAlpha(0.85f);
+                lblCol = clickRestartQueued_
+                             ? queuedAccent
+                             : (clickLoopEnabled_ ? AppTheme::primaryBlue.brighter(0.2f) : AppTheme::warningAmber.withAlpha(0.85f));
             }
             g.setColour(lblCol);
             g.drawText(barTitles[b], bx + 4.0f, secLabelY, barW - 8.0f, secLabelH, juce::Justification::centredLeft);
@@ -828,7 +851,7 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
         for (int beat = 0; beat < beatsPerBar_; ++beat) {
             const float beatX = bx + static_cast<float>(beat) * beatW;
             const bool isCurrentCell = (b == activeVisualBar && beat == activeBeatInBar);
-            const bool isAccentBeat = isCompound_ ? (beat % 3 == 0) : (beat == 0);
+            const bool isAccentBeat = (isCompound_ && beatsPerBar_ != 6) ? (beat % 3 == 0) : (beat == 0);
 
             if (isCurrentCell) {
                 juce::Colour cellCol = (b < 2)
@@ -873,7 +896,10 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
 
     if (activeVisualBar == 2) {
         juce::Rectangle<float> loopRect(contentX + barW * 2.0f, trackY, barW, trackH);
-        g.setColour((clickLoopEnabled_ ? AppTheme::accentGreen : AppTheme::warningAmber).withAlpha(0.65f));
+        const juce::Colour loopBorderCol = clickRestartQueued_
+                                               ? queuedAccent
+                                               : (clickLoopEnabled_ ? AppTheme::accentGreen : AppTheme::warningAmber);
+        g.setColour(loopBorderCol.withAlpha(0.65f));
         g.drawRoundedRectangle(loopRect.reduced(0.5f), 3.0f, 1.25f);
     }
 

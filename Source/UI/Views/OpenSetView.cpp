@@ -591,7 +591,8 @@ void OpenSetView::addSongToCurrentSet(int64_t songId) {
     saveCurrentSetlist();
     preloadCurrentSetlist();
     entryListBox_.updateContent();
-    entryListBox_.selectRow(static_cast<int>(currentSetlist_->entries.size()) - 1);
+    entryListBox_.scrollToEnsureRowIsOnscreen(static_cast<int>(currentSetlist_->entries.size()) - 1);
+    notifySongNavigationState();
 }
 
 Song OpenSetView::buildEffectiveSongForEntry(const SetlistEntry& entry) const {

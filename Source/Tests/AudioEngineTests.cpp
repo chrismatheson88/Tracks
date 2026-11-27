@@ -44,16 +44,104 @@ void testMetronomeCalculations() {
     assert(!met.isCountIn());
     assert(std::abs(met.getTotalBarsElapsed() - 2.5) < 1e-4);
 
-    std::cout << "[Test] Metronome 6/8 Compound Timing..." << std::endl;
-    met.prepare(44100.0);
-    met.setTempo(80);
-    met.setTimeSignature("6/8");
+    std::cout << "[Test] Metronome 6/8 Compound Timing, Accent & Count-In..." << std::endl;
+    auto requireMet = [](bool cond, const char* msg) {
+        if (!cond) {
+            throw std::runtime_error(std::string("Metronome test failed: ") + msg);
+        }
+    };
+    auto makeMetImpulse = [](float amp) {
+        juce::AudioBuffer<float> b(1, 16);
+        b.clear();
+        b.setSample(0, 0, amp);
+        return b;
+    };
 
-    assert(met.getBeatsPerBar() == 6);
+    met.prepare(44100.0);
+    met.setTempo(60); // 60 dotted-quarter BPM -> 3 eighth pulses/sec -> 14700 samples per pulse
+    met.setTimeSignature("6/8");
+    met.setUseSectionCountIn(false);
+
+    requireMet(met.getBeatsPerBar() == 6, "6/8 beatsPerBar should be 6");
+
+    // 6/8 2-bar count-in pattern: 1,-,-,2,-,-,1,2,3,4,5,6
+    const char* expected68Bar0[6] = { "one", "", "", "two", "", "" };
+    const char* expected68Bar1[6] = { "one", "two", "three", "four", "five", "six" };
+    for (int b = 0; b < 6; ++b) {
+        requireMet(met.getScheduledGuideCueForBeat(0, b) == expected68Bar0[b], "6/8 bar 0 count-in mismatch");
+        requireMet(met.getScheduledGuideCueForBeat(1, b) == expected68Bar1[b], "6/8 bar 1 count-in mismatch");
+        requireMet(met.getScheduledGuideCueForBeat(2, b).empty(), "6/8 bar 2 should have no count-in");
+    }
+
+    // 6/8 click accent ONLY on beat 1 (beat 0), unaccented quarterClick on beats 2..6 (including beat 4)
+    met.reset();
+    met.setClickChannel(0);
+    met.setGuideChannel(1);
+    met.setClickGain(1.0f);
+    met.setGuideGain(0.0f);
+    met.setClickSubdivisions(false, false);
+    met.loadClickSamples(makeMetImpulse(0.40f), makeMetImpulse(0.90f), makeMetImpulse(0.50f), makeMetImpulse(0.25f));
+
+    const int pulse68 = 14700;
+    const int bar68 = pulse68 * 6;
+    juce::AudioBuffer<float> buf68(2, bar68);
+    buf68.clear();
+    met.renderBlock(buf68, 0, bar68);
+    requireMet(std::abs(buf68.getSample(0, 0) - 0.90f) < 1e-5f, "6/8 beat 1 should be accented");
+    for (int b = 1; b < 6; ++b) {
+        requireMet(std::abs(buf68.getSample(0, b * pulse68) - 0.40f) < 1e-5f,
+                   "6/8 beats 2..6 (including beat 4) should be unaccented");
+    }
+
+    // 6/8 with eighth subdivisions enabled: beat 1 = accent, beats 2/3/5/6 = eighth, beat 4 = unaccented quarter
+    met.reset();
+    met.setClickSubdivisions(true, false);
+    met.setEighthClickGain(0.6f); // 0.50 * 0.6 = 0.30
+    buf68.clear();
+    met.renderBlock(buf68, 0, bar68);
+    requireMet(std::abs(buf68.getSample(0, 0) - 0.90f) < 1e-5f, "6/8 (8ths on) beat 1 should be accent");
+    requireMet(std::abs(buf68.getSample(0, 1 * pulse68) - 0.30f) < 1e-5f, "6/8 (8ths on) beat 2 should be eighth");
+    requireMet(std::abs(buf68.getSample(0, 2 * pulse68) - 0.30f) < 1e-5f, "6/8 (8ths on) beat 3 should be eighth");
+    requireMet(std::abs(buf68.getSample(0, 3 * pulse68) - 0.40f) < 1e-5f, "6/8 (8ths on) beat 4 should be unaccented quarter");
+    requireMet(std::abs(buf68.getSample(0, 4 * pulse68) - 0.30f) < 1e-5f, "6/8 (8ths on) beat 5 should be eighth");
+    requireMet(std::abs(buf68.getSample(0, 5 * pulse68) - 0.30f) < 1e-5f, "6/8 (8ths on) beat 6 should be eighth");
+
+    // 6/8 with sections: leading 2-bar Count + Intro, plus mid-song 1-bar Count
+    met.setUseSectionCountIn(true);
+    met.setSections({
+        { std::nullopt, "Count", 2, 0 },
+        { std::nullopt, "Intro", 4, 1 },
+        { std::nullopt, "Count", 1, 2 },
+        { std::nullopt, "Chorus", 4, 3 }
+    });
+    for (int b = 0; b < 6; ++b) {
+        requireMet(met.getScheduledGuideCueForBeat(0, b) == expected68Bar0[b], "6/8 section bar 0 count-in mismatch");
+    }
+    requireMet(met.getScheduledGuideCueForBeat(1, 0) == "section:intro", "6/8 bar 1 beat 1 should cue Intro");
+    for (int b = 1; b < 6; ++b) {
+        requireMet(met.getScheduledGuideCueForBeat(1, b) == expected68Bar1[b], "6/8 bar 1 beats 2..6 mismatch");
+    }
+    // Bar 6 is 1-bar Count right before Chorus -> Chorus, 2, 3, 4, 5, 6
+    requireMet(met.getScheduledGuideCueForBeat(6, 0) == "section:chorus", "6/8 1-bar count should cue Chorus");
+    for (int b = 1; b < 6; ++b) {
+        requireMet(met.getScheduledGuideCueForBeat(6, b) == expected68Bar1[b], "6/8 1-bar count beats 2..6 mismatch");
+    }
 
     std::cout << "[Test] Metronome 12/8 Compound Timing..." << std::endl;
+    met.setUseSectionCountIn(false);
+    met.setClickSubdivisions(false, false);
     met.setTimeSignature("12/8");
-    assert(met.getBeatsPerBar() == 12);
+    requireMet(met.getBeatsPerBar() == 12, "12/8 beatsPerBar should be 12");
+    met.reset();
+    const int bar128 = pulse68 * 12;
+    juce::AudioBuffer<float> buf128(2, bar128);
+    buf128.clear();
+    met.renderBlock(buf128, 0, bar128);
+    for (int b = 0; b < 12; ++b) {
+        const float expected = (b % 3 == 0) ? 0.90f : 0.40f;
+        requireMet(std::abs(buf128.getSample(0, b * pulse68) - expected) < 1e-5f,
+                   "12/8 should accent every 3 pulses");
+    }
 
     std::cout << "[Test] Metronome Section Count-In Alignment..." << std::endl;
     met.prepare(44100.0);
@@ -1184,6 +1272,37 @@ void testStreamingAudioTrack() {
         }
     }
 
+    // Verify 44.1 kHz -> 48 kHz phase-locked resampling keeps exact timing across chunk boundaries
+    {
+        auto stream48 = tracks::StreamingAudioTrack::createFromFile(wavPath.string(), 48000.0);
+        require(stream48 != nullptr, "createFromFile 48kHz resampled");
+        const int64_t expected48Samples = static_cast<int64_t>(std::llround(static_cast<double>(totalSamples) * 48000.0 / 44100.0));
+        require(std::abs(stream48->getTotalSamples() - expected48Samples) <= 1, "48kHz totalSamples matches 4.0s duration");
+        require(std::abs(stream48->getSampleRate() - 48000.0) < 0.1, "48kHz sample rate reported");
+
+        // Load chunks 1 & 2 and verify the 440 Hz sine phase is exact across Chunk 0->1 boundary (65536 @ 48 kHz = 1.3653s)
+        std::unique_ptr<juce::AudioFormatReader> r48(fm.createReaderFor(juce::File(wavPath.string())));
+        require(r48 != nullptr, "open wav reader for 48kHz resample");
+        while (true) {
+            int64_t nc = stream48->findNextChunkToLoadAndEvict(true);
+            if (nc <= 0) break;
+            require(stream48->loadChunkFromReader(nc, *r48, readScratch), "load resampled chunk");
+        }
+        const int64_t testStart = tracks::StreamingAudioTrack::kChunkSamples - 64; // straddles chunk 0->1 @ 48 kHz (in loud middle region > 1.0s)
+        stream48->forEachSlice(testStart, 128, [&](const int16_t* sL, const int16_t* sR, int off, int len) {
+            require(sL != nullptr && sR != nullptr, "resampled stereo slices");
+            for (int i = 0; i < len; ++i) {
+                const double tSec = static_cast<double>(testStart + off + i) / 48000.0;
+                const float expL = 0.85f * std::sin(static_cast<float>(2.0 * 3.14159265358979323846 * 440.0 * tSec));
+                const float expR = 0.85f * std::cos(static_cast<float>(2.0 * 3.14159265358979323846 * 660.0 * tSec));
+                const float gotL = static_cast<float>(sL[i]) / 32768.0f;
+                const float gotR = static_cast<float>(sR[i]) / 32768.0f;
+                require(std::abs(gotL - expL) < 0.01f, "48kHz resampled left phase-locked across boundary");
+                require(std::abs(gotR - expR) < 0.01f, "48kHz resampled right phase-locked across boundary");
+            }
+        });
+    }
+
     fs::remove_all(tmpDir, ec);
 }
 
@@ -1285,6 +1404,90 @@ void testMidiBindingSerializationAndMatching() {
     require(!tracks::KeyBinding::deserialize("none").has_value(), "cleared shortcut deserializes to nullopt");
 }
 
+void testClickLoopBackToStart() {
+    std::cout << "[Test] Click-Only Back to Start (Temp Cancel Loop, Bar-End Restart & Reinstate)..." << std::endl;
+    auto require = [](bool cond, const char* msg) {
+        if (!cond) {
+            throw std::runtime_error(std::string("ClickLoopBackToStart test failed: ") + msg);
+        }
+    };
+
+    tracks::ClickLoopController ctrl;
+    ctrl.onPlayStarted(false);
+    require(ctrl.loopEnabled && !ctrl.restartQueued && ctrl.stopBar == -1, "initial click loop active");
+
+    // Ignored when stopped, paused, or in structured timeline mode
+    require(!ctrl.toggleBackToStart(false, false, false, 3), "ignored when stopped");
+    require(!ctrl.toggleBackToStart(true, true, false, 3), "ignored when paused");
+    require(!ctrl.toggleBackToStart(true, false, true, 3), "ignored in structured mode");
+    require(ctrl.loopEnabled && !ctrl.restartQueued, "state unchanged when ignored");
+
+    // Trigger Back to Start while looping in bar 4 -> temporarily cancels loop, queues restart at bar 5
+    require(ctrl.toggleBackToStart(true, false, false, 4), "queues restart in bar 4");
+    require(ctrl.restartQueued, "restartQueued should be true");
+    require(ctrl.restartBoundaryBar == 5, "restart boundary should be end of bar 4 (bar 5)");
+    require(!ctrl.loopEnabled, "loop should be temporarily cancelled");
+    require(ctrl.stopBar == -1, "stopBar should stay -1 so playback restarts instead of stopping");
+
+    // Simulate bar-end transition on Metronome (120 BPM 4/4 -> 88200 samples/bar)
+    auto makeImpulse = [](float amp) {
+        juce::AudioBuffer<float> b(1, 32);
+        b.clear();
+        b.setSample(0, 0, amp);
+        return b;
+    };
+    tracks::Metronome met;
+    met.prepare(44100.0);
+    met.setTempo(120);
+    met.setTimeSignature("4/4");
+    met.setUseSectionCountIn(false);
+    met.setClickChannel(0);
+    met.setGuideChannel(1);
+    met.setClickGain(1.0f);
+    met.setGuideGain(1.0f);
+    met.loadClickSamples(makeImpulse(0.40f), makeImpulse(0.90f));
+    met.loadVoiceWord("one", makeImpulse(0.75f));
+
+    const int barFrames = static_cast<int>(met.getFramesPerBar());
+    met.jumpToFrame(static_cast<int64_t>(barFrames) * 5 - 128);
+
+    // Render last 128 samples of bar 4, then jumpToFrame(0) and execute restart, then render 128 samples of bar 0
+    juce::AudioBuffer<float> out(2, 256);
+    out.clear();
+    met.renderBlock(out, 0, 128);
+    require(met.getMetronomeFrame() == static_cast<int64_t>(barFrames) * 5, "reached exact bar 5 boundary");
+
+    met.jumpToFrame(0);
+    ctrl.onRestartExecuted();
+    require(!ctrl.restartQueued && ctrl.restartBoundaryBar == -1, "restart cleared after execution");
+    require(ctrl.loopEnabled && ctrl.stopBar == -1, "loop reinstated after restart");
+
+    met.renderBlock(out, 128, 128);
+    // Exact sample 128 must have Bar 0 Beat 0 Accent Click (0.90) and Count-In "one" (0.75)
+    require(std::abs(out.getSample(0, 128) - 0.90f) < 1e-5f, "accent click fired at exact restart boundary");
+    require(std::abs(out.getSample(1, 128) - 0.75f) < 1e-5f, "count-in 'one' fired at exact restart boundary");
+    require(met.isCountIn(), "metronome is back inside count-in");
+
+    // Toggling Back to Start a second time before bar end cancels restart and restores loop immediately
+    require(ctrl.toggleBackToStart(true, false, false, 6), "queues restart in bar 6");
+    require(ctrl.restartQueued && !ctrl.loopEnabled, "queued & loop paused");
+    require(!ctrl.toggleBackToStart(true, false, false, 6), "second click cancels restart");
+    require(!ctrl.restartQueued && ctrl.loopEnabled && ctrl.stopBar == -1, "loop restored on cancel");
+
+    // Clicking Loop button while restart is queued cancels restart and keeps looping
+    require(ctrl.toggleBackToStart(true, false, false, 6), "queues restart again");
+    ctrl.setLoopEnabled(true, true, 6);
+    require(!ctrl.restartQueued && ctrl.loopEnabled && ctrl.stopBar == -1, "setLoopEnabled cancels restart");
+
+    // When loop was already OFF, restart executes and preserves loop OFF (stopBar = 3)
+    ctrl.setLoopEnabled(false, true, 4);
+    require(!ctrl.loopEnabled && ctrl.stopBar == 5, "loop off schedules stop at bar 5");
+    require(ctrl.toggleBackToStart(true, false, false, 4), "queues restart while loop off");
+    require(ctrl.stopBar == -1 && ctrl.restartBoundaryBar == 5, "restart overrides stop");
+    ctrl.onRestartExecuted();
+    require(!ctrl.restartQueued && !ctrl.loopEnabled && ctrl.stopBar == 3, "loop-off preserved after restart");
+}
+
 int main() {
     try {
         testMetronomeCalculations();
@@ -1297,6 +1500,7 @@ int main() {
         testStreamingAudioTrack();
         testDirectSectionJumpLogic();
         testMidiBindingSerializationAndMatching();
+        testClickLoopBackToStart();
         std::cout << "[Test] All AudioEngine tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {

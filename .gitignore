@@ -40,6 +40,8 @@ ENV/
 uploaded_tracks/
 Backup/
 Tracks_Backup_*.zip
+assets/tts/
+tts_cache/
 
 # C++ / CMake
 build/

@@ -49,7 +49,7 @@ public:
     std::vector<AudioDeviceInfo> getAvailableOutputDevices();
     bool selectOutputDevice(const std::string& deviceName, int preferredChannels = 32);
     int getCurrentOutputChannels() const { return currentOutputChannels_.load(std::memory_order_relaxed); }
-    double getCurrentSampleRate() const { return currentSampleRate_; }
+    double getCurrentSampleRate() const { return currentSampleRate_.load(std::memory_order_relaxed); }
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager_; }
 
     // Playback Controls
@@ -81,6 +81,14 @@ public:
     int getGuideChannel() const { return metronome_.getGuideChannel(); }
 
     // One-shot text-to-speech announcement routed directly to the Guide channel
+    struct AnnouncementVoiceOption {
+        std::string id;
+        std::string displayName;
+    };
+    static std::vector<AnnouncementVoiceOption> getAvailableAnnouncementVoices();
+    static bool isNeuralTtsAvailable();
+    void setAnnouncementVoice(const std::string& voiceId);
+    std::string getAnnouncementVoice() const;
     void speakGuideText(const std::string& text);
     void stopGuideAnnouncement();
 
@@ -130,6 +138,8 @@ public:
     void toggleClickLoop();
     void setClickLoopEnabled(bool enabled);
     bool isClickLoopEnabled() const { return clickLoopEnabled_.load(std::memory_order_relaxed); }
+    void toggleClickRestart();
+    bool isClickRestartQueued() const { return clickRestartQueued_.load(std::memory_order_relaxed); }
 
     // End-of-song / crossfade transitions between setlist songs
     void setTransitionConfig(SongTransitionMode mode, int crossfadeBars, bool hasNextSong);
@@ -209,6 +219,7 @@ private:
 
     struct CachedSongAudio {
         int64_t songId = 0;
+        double sampleRate = 44100.0;
         std::vector<std::string> trackPaths;
         std::vector<LoadedTrack> tracks;
         int64_t maxLengthFrames = 0;
@@ -235,6 +246,7 @@ private:
     int64_t maxSongLengthFrames_ = 0;
     std::string activeCacheKey_;
     std::vector<std::string> activeTrackPaths_;
+    std::optional<Song> lastLoadedSong_;
 
     std::atomic<bool> isPlaying_{false};
     std::atomic<bool> isPaused_{false};
@@ -250,6 +262,7 @@ private:
     std::atomic<int> selectedStartSectionIndexAtomic_{-1};
     std::atomic<bool> isSectionStartCountInAtomic_{false};
     std::atomic<bool> clickLoopEnabled_{true};
+    std::atomic<bool> clickRestartQueued_{false};
     std::atomic<int> transitionModeAtomic_{0};
     std::atomic<int> transitionCrossfadeBarsAtomic_{1};
     std::atomic<bool> hasNextSongAtomic_{false};
@@ -268,7 +281,7 @@ private:
     int queuedSectionIndex_ = -1;
     int queuedJumpBoundaryBar_ = -1;
     int selectedStartSectionIndex_ = -1;
-    int clickLoopStopBar_ = -1;
+    ClickLoopController clickLoop_;
     bool awaitingTransitionSwap_ = false;
     int64_t trackMuteUntilFrame_ = 0;
     int trackJumpFadeSamplesRemaining_ = 0;
@@ -277,7 +290,7 @@ private:
     int64_t fadeOutTotalSamples_ = 0;
 
     std::atomic<int> currentOutputChannels_{2};
-    double currentSampleRate_ = 44100.0;
+    std::atomic<double> currentSampleRate_{44100.0};
 
     static constexpr int kMaxMeterChannels = 32;
     std::mutex audioMutex_;
@@ -322,19 +335,22 @@ private:
 
     struct PendingTtsJob {
         uint64_t generation = 0;
+        std::string voice;
         std::string text;
         int sampleRate = 44100;
     };
-    std::mutex ttsMutex_;
+    mutable std::mutex ttsMutex_;
     std::condition_variable ttsCv_;
     bool ttsShuttingDown_ = false;
+    std::string announcementVoice_ = "af_heart";
     std::optional<PendingTtsJob> pendingTtsJob_;
     std::unordered_map<std::string, std::shared_ptr<const juce::AudioBuffer<float>>> ttsCache_;
     std::deque<std::string> ttsCacheOrder_;
     std::thread ttsThread_;
 
     void ttsWorkerLoop();
-    static std::shared_ptr<const juce::AudioBuffer<float>> synthesizeTtsMonoBuffer(const std::string& text, int sampleRate);
+    std::shared_ptr<const juce::AudioBuffer<float>> loadAndNormalizeGuideWav(const std::string& wavPath, int targetSampleRate) const;
+    std::shared_ptr<const juce::AudioBuffer<float>> synthesizeSystemTtsMonoBuffer(const std::string& text, int sampleRate) const;
 
     juce::AudioBuffer<float> renderScratchBuffer_;
     juce::AudioBuffer<float> crossfadeScratchBuffer_;
@@ -383,7 +399,7 @@ private:
     static std::string makeCacheKey(const Song& song);
     static std::vector<std::string> extractTrackPaths(const Song& song);
     static std::vector<float> computeWaveformPeaks(const std::vector<LoadedTrack>& tracks, int64_t maxLengthFrames);
-    static std::shared_ptr<CachedSongAudio> decodeSongAudio(const Song& song);
+    static std::shared_ptr<CachedSongAudio> decodeSongAudio(const Song& song, double targetSampleRate);
     static juce::AudioBuffer<float> loadAudioFileStatic(const std::string& filePath);
     juce::AudioBuffer<float> loadAudioFile(const std::string& filePath);
     juce::AudioBuffer<float> loadWavFromMemory(const void* data, size_t size);

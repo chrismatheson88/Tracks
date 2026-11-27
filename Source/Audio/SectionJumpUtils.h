@@ -235,4 +235,82 @@ inline SongTransitionTriggerPlan computeSongTransitionPlan(int64_t prependedCoun
     return plan;
 }
 
+// State machine for click-only ("Just click") bar looping and queued "Back to Start" restarts.
+struct ClickLoopController {
+    bool loopEnabled = true;
+    int stopBar = -1;
+    bool restartQueued = false;
+    int restartBoundaryBar = -1;
+    bool restoreLoopAfterRestart = true;
+
+    void reset() {
+        loopEnabled = true;
+        stopBar = -1;
+        restartQueued = false;
+        restartBoundaryBar = -1;
+        restoreLoopAfterRestart = true;
+    }
+
+    void onPlayStarted(bool structuredTimeline) {
+        restartQueued = false;
+        restartBoundaryBar = -1;
+        restoreLoopAfterRestart = true;
+        stopBar = (!structuredTimeline && !loopEnabled) ? 3 : -1;
+    }
+
+    void cancelRestartKeepingCurrentState(bool isPlaying, int currentBar) {
+        if (!restartQueued) return;
+        restartQueued = false;
+        restartBoundaryBar = -1;
+        loopEnabled = restoreLoopAfterRestart;
+        restoreLoopAfterRestart = true;
+        if (loopEnabled) {
+            stopBar = -1;
+        } else {
+            stopBar = isPlaying ? ((currentBar < 2) ? 3 : (currentBar + 1)) : 3;
+        }
+    }
+
+    void setLoopEnabled(bool enabled, bool isPlaying, int currentBar) {
+        restartQueued = false;
+        restartBoundaryBar = -1;
+        restoreLoopAfterRestart = true;
+        loopEnabled = enabled;
+        if (enabled) {
+            stopBar = -1;
+        } else if (isPlaying) {
+            stopBar = (currentBar < 2) ? 3 : (currentBar + 1);
+        } else {
+            stopBar = 3;
+        }
+    }
+
+    // Toggle "Back to Start" in click-only mode:
+    // Temporarily cancels the loop (if active) and queues a jump to frame 0 at the end of the current bar.
+    // Clicking again before the bar finishes cancels the restart and restores the prior loop state.
+    bool toggleBackToStart(bool isPlaying, bool isPaused, bool structuredTimeline, int currentBar) {
+        if (!isPlaying || isPaused || structuredTimeline) {
+            return false;
+        }
+        if (restartQueued) {
+            cancelRestartKeepingCurrentState(isPlaying, currentBar);
+            return false;
+        }
+        restoreLoopAfterRestart = loopEnabled;
+        loopEnabled = false;
+        stopBar = -1;
+        restartQueued = true;
+        restartBoundaryBar = std::max(0, currentBar) + 1;
+        return true;
+    }
+
+    void onRestartExecuted() {
+        restartQueued = false;
+        restartBoundaryBar = -1;
+        loopEnabled = restoreLoopAfterRestart;
+        restoreLoopAfterRestart = true;
+        stopBar = loopEnabled ? -1 : 3;
+    }
+};
+
 } // namespace tracks

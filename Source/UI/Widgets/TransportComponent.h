@@ -79,6 +79,7 @@ private:
 
     class TransportIconButton;
     class CrossfadeBarsStepper;
+    std::unique_ptr<TransportIconButton> backToStartButton_;
     std::unique_ptr<TransportIconButton> prevSongButton_;
     std::unique_ptr<TransportIconButton> skipBackButton_;
     std::unique_ptr<TransportIconButton> playPauseButton_;
@@ -87,6 +88,7 @@ private:
     std::unique_ptr<TransportIconButton> repeatSectionButton_;
     std::unique_ptr<TransportIconButton> skipForwardButton_;
     std::unique_ptr<TransportIconButton> nextSongButton_;
+    juce::Label transitionHeadingLabel_{{}, "At end:"};
     juce::ComboBox transitionBox_;
     std::unique_ptr<CrossfadeBarsStepper> crossfadeBarsStepper_;
     juce::Label crossfadeBarsLabel_{{}, "bar"};

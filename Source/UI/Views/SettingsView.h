@@ -49,6 +49,10 @@ private:
     juce::Label voiceLabel_{{}, "Guide Voice:"};
     juce::ComboBox voiceBox_;
     juce::ToggleButton announceSongNameToggle_{"Announce song name on Guide channel"};
+    juce::Label announceVoiceLabel_{{}, "Song Voice:"};
+    juce::ComboBox announceVoiceBox_;
+    juce::TextButton testAnnounceVoiceButton_{"Test"};
+    std::vector<AudioEngine::AnnouncementVoiceOption> announcementVoiceOptions_;
 
     // Volumes
     juce::Label volumeSectionLabel_{{}, "DEFAULT VOLUMES"};
