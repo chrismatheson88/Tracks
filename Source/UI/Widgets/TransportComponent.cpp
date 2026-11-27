@@ -59,6 +59,7 @@ std::vector<juce::String> computeShortTrackLabels(const std::vector<SongTrack>& 
 }
 
 constexpr int kStereoChannelItemBaseId = 1000;
+constexpr int kJustClickComboId = 100000;
 
 void populateChannelCombo(juce::ComboBox& box, int numChannels) {
     int count = std::max(1, numChannels);
@@ -652,8 +653,7 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
         std::string newKey = keyBox_.getText().toStdString();
         if (!newKey.empty() && newKey != currentKey_) {
             currentKey_ = newKey;
-            const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
-            if (usingTracks) {
+            if (isUsingTracks()) {
                 arrangementTargetKey_ = newKey;
                 applyCurrentKeyPitchShift();
             }
@@ -678,30 +678,44 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     };
     addAndMakeVisible(timeSigBox_);
 
-    useTracksToggle_.setToggleState(false, juce::dontSendNotification);
-    useTracksToggle_.setEnabled(false);
     audioEngine_.setUseTracks(false);
-    useTracksToggle_.onClick = [this]() {
-        audioEngine_.setUseTracks(useTracksToggle_.getToggleState());
-        applyActiveModeSettings();
-        updateTrackStripsEnabled();
-        resized();
-        repaint();
-    };
-    addAndMakeVisible(useTracksToggle_);
-
-    arrangementBox_.setTextWhenNothingSelected("Arrangement");
-    arrangementBox_.setTextWhenNoChoicesAvailable("No arrangements");
+    arrangementBox_.setTextWhenNothingSelected("Just click");
+    arrangementBox_.setTextWhenNoChoicesAvailable("Just click");
+    arrangementBox_.addItem("Just click", kJustClickComboId);
+    arrangementBox_.setSelectedId(kJustClickComboId, juce::dontSendNotification);
     arrangementBox_.onChange = [this]() {
-        int idx = arrangementBox_.getSelectedItemIndex();
+        const int selId = arrangementBox_.getSelectedId();
+        if (selId == kJustClickComboId) {
+            justClickSelected_ = true;
+            activeArrangementId_ = std::nullopt;
+            audioEngine_.setUseTracks(false);
+            if (onArrangementChanged) {
+                onArrangementChanged(std::nullopt);
+            } else {
+                applyActiveModeSettings();
+                updateTrackStripsEnabled();
+                resized();
+                repaint();
+            }
+            return;
+        }
+        const int idx = selId - 1;
         if (idx >= 0 && idx < static_cast<int>(currentArrangements_.size())) {
+            justClickSelected_ = false;
             const auto& arr = currentArrangements_[static_cast<size_t>(idx)];
+            activeArrangementId_ = arr.id;
+            audioEngine_.setUseTracks(!arr.tracks.empty());
             if (arr.id.has_value() && onArrangementChanged) {
-                onArrangementChanged(*arr.id);
+                onArrangementChanged(arr.id);
+            } else {
+                applyActiveModeSettings();
+                updateTrackStripsEnabled();
+                resized();
+                repaint();
             }
         }
     };
-    addChildComponent(arrangementBox_);
+    addAndMakeVisible(arrangementBox_);
 
     eighthsToggle_.setToggleState(false, juce::dontSendNotification);
     eighthsToggle_.onClick = [this]() {
@@ -808,7 +822,8 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     addAndMakeVisible(beatPlayhead_);
     addAndMakeVisible(outputMeter_);
 
-    startTimerHz(60); // 60 FPS smooth playbar and meter animation
+    currentTimerHz_ = 10;
+    startTimerHz(currentTimerHz_); // Adaptive timer: 30 Hz during playback/metering, 5 Hz when idle
 }
 
 TransportComponent::~TransportComponent() {
@@ -865,16 +880,20 @@ int TransportComponent::getActiveOriginalTrackTempo() const {
     return std::clamp(clickOnlyTempo_ > 0 ? clickOnlyTempo_ : 120, 20, 300);
 }
 
+bool TransportComponent::isUsingTracks() const {
+    if (justClickSelected_) return false;
+    return !currentTracks_.empty() || audioEngine_.hasLoadedTracks();
+}
+
 std::pair<int, int> TransportComponent::getCurrentAllowedTempoRange() const {
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
-    if (usingTracks) {
+    if (isUsingTracks()) {
         return getAllowedTrackTempoRange(getActiveOriginalTrackTempo());
     }
     return { 20, 300 };
 }
 
 void TransportComponent::updateTempoControlsUi() {
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool usingTracks = isUsingTracks();
     const auto [minBpm, maxBpm] = getCurrentAllowedTempoRange();
     tempoDownButton_.setEnabled(currentTempo_ > minBpm);
     tempoUpButton_.setEnabled(currentTempo_ < maxBpm);
@@ -906,8 +925,7 @@ void TransportComponent::nudgeTempo(int delta) {
     if (nextTempo == currentTempo_) return;
 
     currentTempo_ = nextTempo;
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
-    if (usingTracks) {
+    if (isUsingTracks()) {
         arrangementTargetTempo_ = currentTempo_;
     }
     tempoEditor_.setText(juce::String(currentTempo_), false);
@@ -920,7 +938,7 @@ void TransportComponent::commitTempoEditor(bool clampAndFormat) {
     auto text = tempoEditor_.getText().trim();
     int parsed = text.getIntValue();
     const auto [minBpm, maxBpm] = getCurrentAllowedTempoRange();
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool usingTracks = isUsingTracks();
 
     if (clampAndFormat) {
         if (text.isEmpty() || parsed <= 0) {
@@ -950,8 +968,7 @@ void TransportComponent::commitTempoEditor(bool clampAndFormat) {
 }
 
 void TransportComponent::notifySongParamsChanged() {
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
-    if (!usingTracks) {
+    if (!isUsingTracks()) {
         clickOnlyTempo_ = currentTempo_;
         clickOnlyKey_ = currentKey_;
         clickOnlyTimeSig_ = currentTimeSig_;
@@ -962,7 +979,7 @@ void TransportComponent::notifySongParamsChanged() {
 }
 
 void TransportComponent::updateSongParamEditorsEnabled() {
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool usingTracks = isUsingTracks();
     tempoEditor_.setEnabled(true); // Tempo can be varied live (limited to +/-10 BPM when tracks are enabled)
     keyBox_.setEnabled(true);      // Key can be transposed live via real-time pitch shifting (Drums & FX excluded)
     timeSigBox_.setEnabled(!usingTracks);
@@ -970,7 +987,7 @@ void TransportComponent::updateSongParamEditorsEnabled() {
 }
 
 void TransportComponent::applyCurrentKeyPitchShift() {
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool usingTracks = isUsingTracks();
     if (!usingTracks) {
         audioEngine_.setPitchSemitones(0);
         keyBox_.setTooltip("Song Key (click-only mode)");
@@ -1037,11 +1054,11 @@ void TransportComponent::populateKeyBoxOptions(bool filterByTrackKey, const std:
 }
 
 void TransportComponent::applyActiveModeSettings() {
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool usingTracks = isUsingTracks();
     updateSongParamEditorsEnabled();
 
     const SongArrangement* selectedArr = nullptr;
-    if (!currentArrangements_.empty()) {
+    if (!justClickSelected_ && !currentArrangements_.empty()) {
         if (activeArrangementId_.has_value()) {
             for (const auto& arr : currentArrangements_) {
                 if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
@@ -1137,6 +1154,7 @@ void TransportComponent::applyActiveModeSettings() {
 
 void TransportComponent::syncArrangements(const std::vector<SongArrangement>& arrangements,
                                           std::optional<int64_t> activeArrangementId,
+                                          bool justClickMode,
                                           int clickOnlyTempo,
                                           const std::string& clickOnlyKey,
                                           const std::string& clickOnlyTimeSig,
@@ -1166,13 +1184,26 @@ void TransportComponent::syncArrangements(const std::vector<SongArrangement>& ar
         }
     }
     if (!currentArrangements_.empty()) {
+        arrangementBox_.addSeparator();
+    }
+    arrangementBox_.addItem("Just click", kJustClickComboId);
+
+    if (justClickMode || currentArrangements_.empty()) {
+        justClickSelected_ = true;
+        activeArrangementId_ = std::nullopt;
+        arrangementBox_.setSelectedId(kJustClickComboId, juce::dontSendNotification);
+        audioEngine_.setUseTracks(false);
+    } else {
+        justClickSelected_ = false;
         arrangementBox_.setSelectedId(selectedIdx + 1, juce::dontSendNotification);
         if (!activeArrangementId_.has_value()) {
             activeArrangementId_ = currentArrangements_[static_cast<size_t>(selectedIdx)].id;
         }
+        audioEngine_.setUseTracks(!currentArrangements_[static_cast<size_t>(selectedIdx)].tracks.empty());
     }
 
     applyActiveModeSettings();
+    updateTrackStripsEnabled();
     resized();
     repaint();
 }
@@ -1220,9 +1251,9 @@ void TransportComponent::notifyClickSubdivisionsChanged() {
     const float g8 = sliderDbToLinear(static_cast<float>(eighthClickSlider_.getValue()));
     const float g16 = sliderDbToLinear(static_cast<float>(sixteenthClickSlider_.getValue()));
 
-    const bool usingTracks = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool usingTracks = isUsingTracks();
     bool activeArrIsTrackless = false;
-    if (activeArrangementId_.has_value()) {
+    if (!justClickSelected_ && activeArrangementId_.has_value()) {
         for (const auto& arr : currentArrangements_) {
             if (arr.id.has_value() && *arr.id == *activeArrangementId_) {
                 activeArrIsTrackless = arr.tracks.empty();
@@ -1231,7 +1262,7 @@ void TransportComponent::notifyClickSubdivisionsChanged() {
         }
     }
     std::optional<int64_t> targetArrId;
-    if ((usingTracks || activeArrIsTrackless) && activeArrangementId_.has_value()) {
+    if (!justClickSelected_ && (usingTracks || activeArrIsTrackless) && activeArrangementId_.has_value()) {
         targetArrId = activeArrangementId_;
         for (auto& arr : currentArrangements_) {
             if (arr.id.has_value() && *arr.id == *targetArrId) {
@@ -1290,15 +1321,12 @@ void TransportComponent::syncTracksAvailability(std::optional<int64_t> songId,
     const bool trackListChanged = isNewSong || (newPaths != lastTrackPaths_);
 
     if (!hasTracks) {
-        useTracksToggle_.setToggleState(false, juce::dontSendNotification);
-        useTracksToggle_.setEnabled(false);
         audioEngine_.setUseTracks(false);
     } else {
-        useTracksToggle_.setEnabled(true);
         if (isNewSong || !lastHadTracks_) {
-            useTracksToggle_.setToggleState(true, juce::dontSendNotification);
+            justClickSelected_ = false;
         }
-        audioEngine_.setUseTracks(useTracksToggle_.getToggleState());
+        audioEngine_.setUseTracks(!justClickSelected_);
     }
 
     lastSongId_ = songId;
@@ -1375,7 +1403,7 @@ void TransportComponent::rebuildTrackStrips() {
 }
 
 void TransportComponent::updateTrackStripsEnabled() {
-    const bool enabled = useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool enabled = isUsingTracks();
     for (auto& strip : trackStrips_) {
         strip->setEnabled(enabled);
         strip->repaint();
@@ -1408,10 +1436,18 @@ void TransportComponent::layoutTrackStrips(int viewportWidth, int viewportHeight
 
 void TransportComponent::setPlayingState(bool isPlaying, bool isPaused) {
     if (!playPauseButton_) return;
+    if (isPlaying == lastPlayingState_ && isPaused == lastPausedState_) return;
+    lastPlayingState_ = isPlaying;
+    lastPausedState_ = isPaused;
+
     if (isPlaying && !isPaused) {
         playPauseButton_->setIconType(TransportIconButton::IconType::Pause);
         playPauseButton_->setBaseColour(AppTheme::warningAmber);
         playPauseButton_->setTooltip("Pause");
+        if (currentTimerHz_ != 30) {
+            currentTimerHz_ = 30;
+            startTimerHz(30);
+        }
     } else {
         playPauseButton_->setIconType(TransportIconButton::IconType::Play);
         playPauseButton_->setBaseColour(AppTheme::primaryBlue);
@@ -1436,6 +1472,8 @@ void TransportComponent::setTransitionConfig(SongTransitionMode mode, int crossf
 }
 
 void TransportComponent::timerCallback() {
+    audioEngine_.flushPendingWaveformRebuild();
+
     int deviceChannels = std::max(1, audioEngine_.getCurrentOutputChannels());
     if (deviceChannels != lastDeviceChannelCount_) {
         refreshAvailableChannels(deviceChannels);
@@ -1483,37 +1521,41 @@ void TransportComponent::timerCallback() {
             canSkipFwd = canStepStartSection(currentSectionSpans_, selectedStartSec, 1);
         }
     }
-    if (skipBackButton_) {
-        skipBackButton_->setEnabled(canSkipBack);
-        skipBackButton_->setTooltip(playing ? "Skip Back to Previous Section" : "Select Earlier Start Section");
-    }
-    if (skipForwardButton_) {
-        skipForwardButton_->setEnabled(canSkipFwd);
-        skipForwardButton_->setTooltip(playing ? "Skip Forward to Next Section" : "Select Later Start Section");
-    }
+
+    auto setBtnStateIfChanged = [](TransportIconButton* btn, bool enabled, const juce::String& tip) {
+        if (!btn) return;
+        if (btn->isEnabled() != enabled) btn->setEnabled(enabled);
+        if (btn->getTooltip() != tip) btn->setTooltip(tip);
+    };
+
+    setBtnStateIfChanged(skipBackButton_.get(), canSkipBack,
+                         playing ? "Skip Back to Previous Section" : "Select Earlier Start Section");
+    setBtnStateIfChanged(skipForwardButton_.get(), canSkipFwd,
+                         playing ? "Skip Forward to Next Section" : "Select Later Start Section");
+
     const bool clickLoopOn = audioEngine_.isClickLoopEnabled();
     if (repeatSectionButton_) {
         if (showWaveform) {
-            repeatSectionButton_->setEnabled(canRepeat);
             repeatSectionButton_->setActiveHighlight(repeatActive);
             repeatSectionButton_->setBaseColour(repeatActive ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
-            repeatSectionButton_->setTooltip(repeatActive ? "Cancel Repeat Current Section" : "Repeat Current Section");
+            setBtnStateIfChanged(repeatSectionButton_.get(), canRepeat,
+                                 repeatActive ? "Cancel Repeat Current Section" : "Repeat Current Section");
         } else {
-            repeatSectionButton_->setEnabled(true);
             repeatSectionButton_->setActiveHighlight(clickLoopOn);
             repeatSectionButton_->setBaseColour(clickLoopOn ? juce::Colour(0xff0284c7) : AppTheme::bgPanel);
+            juce::String tip;
             if (playing) {
-                repeatSectionButton_->setTooltip(clickLoopOn
-                                                     ? "Loop Active - Click to End After This Bar"
-                                                     : "Ending After This Bar - Click to Keep Looping");
+                tip = clickLoopOn ? "Loop Active - Click to End After This Bar"
+                                  : "Ending After This Bar - Click to Keep Looping";
             } else {
-                repeatSectionButton_->setTooltip(clickLoopOn
-                                                     ? "Loop Click Bar (Active)"
-                                                     : "Loop Click Bar (Off - Plays 1 Bar After Count-In)");
+                tip = clickLoopOn ? "Loop Click Bar (Active)"
+                                  : "Loop Click Bar (Off - Plays 1 Bar After Count-In)";
             }
+            setBtnStateIfChanged(repeatSectionButton_.get(), true, tip);
         }
     }
 
+    const bool loadingTracks = audioEngine_.isLoadingTracks();
     beatPlayhead_.updatePlayhead(totalBarsElapsed,
                                 audioEngine_.getCurrentBeatInBar(),
                                 audioEngine_.getCurrentBar(),
@@ -1524,14 +1566,29 @@ void TransportComponent::timerCallback() {
                                 showWaveform,
                                 audioEngine_.getTrackDurationInBars(),
                                 audioEngine_.getTrackBarCount(),
-                                audioEngine_.isLoadingTracks(),
+                                loadingTracks,
                                 leadingCount,
                                 queuedSec,
                                 selectedStartSec,
                                 inSectionStartCountIn,
                                 clickLoopOn);
 
-    outputMeter_.updatePeaks(audioEngine_.getOutputPeaks());
+    auto peaks = audioEngine_.getOutputPeaks();
+    bool anyPeakActive = false;
+    for (float p : peaks) {
+        if (p > 0.0005f) {
+            anyPeakActive = true;
+            break;
+        }
+    }
+    outputMeter_.updatePeaks(peaks);
+
+    // Adapt GUI timer frequency: 30 Hz during active playback/metering/loading, 5 Hz when idle
+    const int desiredHz = ((playing && !paused) || anyPeakActive || loadingTracks) ? 30 : 5;
+    if (desiredHz != currentTimerHz_) {
+        currentTimerHz_ = desiredHz;
+        startTimerHz(desiredHz);
+    }
 }
 
 void TransportComponent::setLayoutMode(LayoutMode mode) {
@@ -1570,7 +1627,7 @@ void TransportComponent::setLayoutMode(LayoutMode mode) {
 
     clickChannelBox_.setVisible(expanded);
     guideChannelBox_.setVisible(expanded);
-    const bool showTrackStrips = expanded && !trackStrips_.empty() && useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+    const bool showTrackStrips = expanded && !trackStrips_.empty() && isUsingTracks();
     trackStripsViewport_.setVisible(showTrackStrips);
     updateSubdivisionFaderVisibility();
 
@@ -1631,14 +1688,9 @@ void TransportComponent::resized() {
         badgeRow.removeFromLeft(10);
         timeSigBox_.setBounds(badgeRow.removeFromLeft(68));
         badgeRow.removeFromLeft(12);
-        useTracksToggle_.setBounds(badgeRow.removeFromLeft(96));
-        const bool showArrBox = !currentArrangements_.empty();
-        arrangementBox_.setVisible(showArrBox);
-        if (showArrBox) {
-            badgeRow.removeFromLeft(4);
-            arrangementBox_.setBounds(badgeRow.removeFromLeft(140));
-        }
-        badgeRow.removeFromLeft(8);
+        arrangementBox_.setVisible(true);
+        arrangementBox_.setBounds(badgeRow.removeFromLeft(156));
+        badgeRow.removeFromLeft(10);
         eighthsToggle_.setBounds(badgeRow.removeFromLeft(62));
         badgeRow.removeFromLeft(4);
         sixteenthsToggle_.setBounds(badgeRow.removeFromLeft(68));
@@ -1710,7 +1762,7 @@ void TransportComponent::resized() {
         area.removeFromTop(14);
 
         // Bottom area: Full-height Vertical Mixer Faders (Master, Click, [8th Click], [16th Click], Guide + per-track strips) + Output Peak Meters
-        const bool hasTrackStrips = !trackStrips_.empty() && useTracksToggle_.isEnabled() && useTracksToggle_.getToggleState();
+        const bool hasTrackStrips = !trackStrips_.empty() && isUsingTracks();
         const bool showEighths = eighthsToggle_.getToggleState();
         const bool showSixteenths = sixteenthsToggle_.getToggleState();
         clickChannelBox_.setVisible(true);
@@ -1801,7 +1853,7 @@ void TransportComponent::resized() {
     skipBackButton_->setVisible(true);
     repeatSectionButton_->setVisible(true);
     skipForwardButton_->setVisible(true);
-    arrangementBox_.setVisible(false);
+    arrangementBox_.setVisible(true);
     clickChannelBox_.setVisible(false);
     guideChannelBox_.setVisible(false);
     trackStripsViewport_.setVisible(false);
@@ -1824,7 +1876,7 @@ void TransportComponent::resized() {
     area.removeFromLeft(8);
 
     // Song info column
-    auto infoArea = area.removeFromLeft(392);
+    auto infoArea = area.removeFromLeft(408);
     songTitleLabel_.setBounds(infoArea.removeFromTop(20));
     songArtistLabel_.setBounds(infoArea.removeFromTop(16));
     infoArea.removeFromTop(6);
@@ -1838,7 +1890,7 @@ void TransportComponent::resized() {
     badgeRow.removeFromLeft(4);
     timeSigBox_.setBounds(badgeRow.removeFromLeft(54));
     badgeRow.removeFromLeft(6);
-    useTracksToggle_.setBounds(badgeRow.removeFromLeft(88));
+    arrangementBox_.setBounds(badgeRow.removeFromLeft(104));
     badgeRow.removeFromLeft(2);
     eighthsToggle_.setBounds(badgeRow.removeFromLeft(54));
     badgeRow.removeFromLeft(2);

@@ -35,6 +35,7 @@ public:
                                 const std::vector<SongSection>& sections = {});
     void syncArrangements(const std::vector<SongArrangement>& arrangements,
                           std::optional<int64_t> activeArrangementId,
+                          bool justClickMode,
                           int clickOnlyTempo,
                           const std::string& clickOnlyKey,
                           const std::string& clickOnlyTimeSig,
@@ -68,7 +69,7 @@ public:
     std::function<void(int64_t, float, int, bool)> onTrackMixChanged;
     std::function<void(int64_t, std::optional<int64_t>, bool, bool, float, float)> onSongClickSubdivisionsChanged;
     std::function<void(std::optional<int64_t>, int, const std::string&, const std::string&)> onSongParamsChanged;
-    std::function<void(int64_t)> onArrangementChanged;
+    std::function<void(std::optional<int64_t>)> onArrangementChanged;
 
     void resized() override;
     void paint(juce::Graphics& g) override;
@@ -100,8 +101,8 @@ private:
     juce::Label keyPrefixLabel_{{}, "Key:"};
     juce::ComboBox keyBox_;
     juce::ComboBox timeSigBox_;
-    juce::ToggleButton useTracksToggle_{"Use tracks"};
     juce::ComboBox arrangementBox_;
+    bool justClickSelected_ = true;
     juce::ToggleButton eighthsToggle_{"8ths"};
     juce::ToggleButton sixteenthsToggle_{"16ths"};
     int currentTempo_ = 120;
@@ -155,8 +156,12 @@ private:
     std::vector<std::string> lastTrackPaths_;
     bool lastHadTracks_ = false;
     int lastDeviceChannelCount_ = 0;
+    int currentTimerHz_ = 0;
+    bool lastPlayingState_ = false;
+    bool lastPausedState_ = false;
 
     void refreshAvailableChannels(int numChannels);
+    bool isUsingTracks() const;
     void rebuildTrackStrips();
     void updateTrackStripsEnabled();
     void notifyClickSubdivisionsChanged();

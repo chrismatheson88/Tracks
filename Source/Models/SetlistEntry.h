@@ -40,12 +40,13 @@ struct SetlistEntry {
     std::optional<std::string> overrideKey;
     std::optional<std::string> overrideTimeSignature;
     std::optional<int64_t> arrangementId;
+    bool justClick = false;
     SongTransitionMode transitionMode = SongTransitionMode::StayInCurrentSong;
     int transitionCrossfadeBars = 1;
     std::optional<Song> song;
 
     const SongArrangement* getSelectedArrangement() const {
-        if (!song.has_value()) return nullptr;
+        if (justClick || !song.has_value()) return nullptr;
         return song->findArrangement(arrangementId);
     }
 

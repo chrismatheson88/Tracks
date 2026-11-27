@@ -1,6 +1,7 @@
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include "../Audio/Metronome.h"
+#include "../Audio/StreamingAudioTrack.h"
 #include "../Audio/MidiTempoImporter.h"
 #include "../Audio/PitchShiftUtils.h"
 #include "../Audio/SectionJumpUtils.h"
@@ -1062,6 +1063,129 @@ void testTempoMapAndMidiImport() {
            std::abs(midiRes.points[1].bpm - 80.0) < 1e-2);
 }
 
+void testStreamingAudioTrack() {
+    std::cout << "[Test] StreamingAudioTrack Chunked Disk Streaming, Boundaries & Eviction..." << std::endl;
+    namespace fs = std::filesystem;
+
+    auto require = [](bool cond, const char* msg) {
+        if (!cond) {
+            throw std::runtime_error(std::string("StreamingAudioTrack test failed: ") + msg);
+        }
+    };
+
+    auto tmpDir = fs::temp_directory_path() / "tracks_streaming_unit_test";
+    std::error_code ec;
+    fs::remove_all(tmpDir, ec);
+    fs::create_directories(tmpDir);
+
+    // 1. Write a multi-chunk stereo 16-bit WAV (~2.7 chunks = 176,400 samples = 4.0s @ 44.1kHz)
+    //    with distinct amplitude profile (quiet intro, loud middle, silent tail) and deterministic sine waves.
+    const int totalSamples = 176400;
+    const double sr = 44100.0;
+    juce::AudioBuffer<float> refBuf(2, totalSamples);
+    for (int i = 0; i < totalSamples; ++i) {
+        float amp = 0.0f;
+        if (i < 44100) amp = 0.25f;
+        else if (i < 132300) amp = 0.85f;
+        else amp = 0.0f;
+        const float phaseL = static_cast<float>(2.0 * 3.14159265358979323846 * 440.0 * i / sr);
+        const float phaseR = static_cast<float>(2.0 * 3.14159265358979323846 * 660.0 * i / sr);
+        refBuf.setSample(0, i, amp * std::sin(phaseL));
+        refBuf.setSample(1, i, amp * std::cos(phaseR));
+    }
+
+    auto wavPath = tmpDir / "stream_test.wav";
+    {
+        juce::WavAudioFormat wavFormat;
+        juce::File outFile(wavPath.string());
+        std::unique_ptr<juce::FileOutputStream> fos(outFile.createOutputStream());
+        require(fos != nullptr && fos->openedOk(), "createOutputStream");
+        std::unique_ptr<juce::AudioFormatWriter> writer(
+            wavFormat.createWriterFor(fos.get(), sr, 2, 16, {}, 0));
+        require(writer != nullptr, "createWriterFor");
+        fos.release(); // owned by writer now
+        const bool wroteOk = writer->writeFromAudioSampleBuffer(refBuf, 0, totalSamples);
+        require(wroteOk, "writeFromAudioSampleBuffer");
+    }
+
+    auto stream = tracks::StreamingAudioTrack::createFromFile(wavPath.string());
+    require(stream != nullptr, "createFromFile wav");
+    require(stream->getNumChannels() == 2, "numChannels == 2");
+    require(stream->getTotalSamples() == totalSamples, "totalSamples match");
+    require(stream->getTotalChunks() == 3, "totalChunks == 3");
+
+    // Only Chunk 0 should be resident initially (low RAM!)
+    require(stream->hasChunk(0), "chunk 0 pinned");
+    require(!stream->hasChunk(1), "chunk 1 not loaded initially");
+    require(!stream->hasChunk(2), "chunk 2 not loaded initially");
+
+    // Waveform envelope should capture quiet intro, loud middle, and silent tail
+    require(stream->getWaveformBin(64) > 0.12f && stream->getWaveformBin(64) < 0.35f, "quiet intro bin");
+    require(stream->getWaveformBin(256) > 0.50f, "loud middle bin");
+    require(stream->getWaveformBin(480) < 0.01f, "silent tail bin");
+
+    // Stream chunks 1 and 2 via reader, then verify sample-accurate reads across chunk boundaries
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(juce::File(wavPath.string())));
+    require(reader != nullptr, "open wav reader");
+    juce::AudioBuffer<float> readScratch(2, tracks::StreamingAudioTrack::kChunkSamples);
+
+    int loadedCount = 0;
+    while (true) {
+        int64_t nextChunk = stream->findNextChunkToLoadAndEvict(true);
+        if (nextChunk <= 0) break;
+        const bool ok = stream->loadChunkFromReader(nextChunk, *reader, readScratch);
+        require(ok, "loadChunkFromReader");
+        ++loadedCount;
+    }
+    require(loadedCount == 2, "loaded 2 chunks");
+    require(stream->hasChunk(1) && stream->hasChunk(2), "chunks 1 and 2 resident");
+
+    // Verify reads straddling Chunk 0->1 boundary (65536) and Chunk 1->2 boundary (131072)
+    auto verifyRange = [&](int64_t startF, int count) {
+        int seen = 0;
+        stream->forEachSlice(startF, count, [&](const int16_t* sL, const int16_t* sR, int off, int len) {
+            require(sL != nullptr && sR != nullptr, "non-null stereo pointers");
+            for (int i = 0; i < len; ++i) {
+                const int idx = static_cast<int>(startF) + off + i;
+                const float gotL = static_cast<float>(sL[i]) / 32768.0f;
+                const float gotR = static_cast<float>(sR[i]) / 32768.0f;
+                require(std::abs(gotL - refBuf.getSample(0, idx)) < 0.002f, "left sample match");
+                require(std::abs(gotR - refBuf.getSample(1, idx)) < 0.002f, "right sample match");
+            }
+            seen += len;
+        });
+        require(seen == count, "full slice coverage");
+    };
+
+    verifyRange(0, 512);
+    verifyRange(tracks::StreamingAudioTrack::kChunkSamples - 128, 512);
+    verifyRange(tracks::StreamingAudioTrack::kChunkSamples * 2 - 64, 256);
+
+    // Trimming on stop frees non-zero chunks while keeping Chunk 0 pinned
+    stream->trimToIntroOnly();
+    require(stream->hasChunk(0), "chunk 0 stays pinned after trim");
+    require(!stream->hasChunk(1), "chunk 1 evicted on trim");
+    require(!stream->hasChunk(2), "chunk 2 evicted on trim");
+
+    // Verify compressed M4A streaming creation works cleanly too
+    auto guideDir = fs::current_path() / "assets" / "guide" / "playback_female";
+    if (fs::exists(guideDir)) {
+        for (const auto& entry : fs::directory_iterator(guideDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".m4a") {
+                auto m4aStream = tracks::StreamingAudioTrack::createFromFile(entry.path().string());
+                require(m4aStream != nullptr, "createFromFile m4a");
+                require(m4aStream->getTotalSamples() > 0, "m4a totalSamples > 0");
+                require(m4aStream->hasChunk(0), "m4a chunk 0 pinned");
+                break;
+            }
+        }
+    }
+
+    fs::remove_all(tmpDir, ec);
+}
+
 int main() {
     try {
         testMetronomeCalculations();
@@ -1071,6 +1195,7 @@ int main() {
         testQueuedSectionSkipLogic();
         testLibraryBackupAndImportRoundTrip();
         testTempoMapAndMidiImport();
+        testStreamingAudioTrack();
         std::cout << "[Test] All AudioEngine tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {

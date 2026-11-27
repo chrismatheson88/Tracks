@@ -97,6 +97,7 @@ struct Song {
     std::vector<TempoPoint> tempoPoints;
     std::vector<SongArrangement> arrangements;
     std::optional<int64_t> activeArrangementId; // Runtime selection for playback & caching
+    bool justClickMode = false;                 // Runtime flag when "Just click" is chosen in Live/Transport
 
     void addTrack(const SongTrack& track) {
         tracks.push_back(track);

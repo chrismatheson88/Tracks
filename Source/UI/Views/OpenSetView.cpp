@@ -596,6 +596,7 @@ void OpenSetView::addSongToCurrentSet(int64_t songId) {
 
 Song OpenSetView::buildEffectiveSongForEntry(const SetlistEntry& entry) const {
     Song effectiveSong = entry.song.value_or(Song{});
+    effectiveSong.justClickMode = entry.justClick;
     const auto* arr = entry.getSelectedArrangement();
     if (arr != nullptr) {
         effectiveSong.activeArrangementId = arr->id;
@@ -626,6 +627,8 @@ Song OpenSetView::buildEffectiveSongForEntry(const SetlistEntry& entry) const {
         effectiveSong.tempo = entry.overrideTempo.value_or(effectiveSong.tempo);
         effectiveSong.key = entry.overrideKey.value_or(effectiveSong.key);
         effectiveSong.timeSignature = entry.overrideTimeSignature.value_or(effectiveSong.timeSignature);
+        effectiveSong.tracks.clear();
+        effectiveSong.sections.clear();
         effectiveSong.tempoPoints.clear();
     }
     return effectiveSong;
@@ -647,27 +650,25 @@ std::optional<Song> OpenSetView::getClickOnlyBaselineForCurrentSong() const {
 void OpenSetView::preloadCurrentSetlist() {
     if (!isVisible() || !currentSetlist_ || !currentSetlist_->id.has_value()) return;
 
-    std::vector<Song> songsInSet;
-    for (const auto& entry : currentSetlist_->entries) {
-        if (!entry.song.has_value()) continue;
-        if (!entry.song->arrangements.empty()) {
-            for (const auto& arr : entry.song->arrangements) {
-                if (arr.tracks.empty()) continue;
-                Song s = *entry.song;
-                s.activeArrangementId = arr.id;
-                s.tempo = arr.tempo;
-                s.key = arr.key;
-                s.timeSignature = arr.timeSignature;
-                s.tracks = arr.tracks;
-                s.sections = arr.sections;
-                s.tempoPoints = arr.tempoPoints;
-                songsInSet.push_back(std::move(s));
+    // Sliding-window preload: only cache the selected arrangement for the current, next, and previous songs
+    // so song switching and crossfades stay instant while keeping RAM bounded regardless of setlist size.
+    std::vector<Song> songsToPreload;
+    const int n = static_cast<int>(currentSetlist_->entries.size());
+    if (n > 0) {
+        const int center = (selectedEntryIndex_ >= 0 && selectedEntryIndex_ < n) ? selectedEntryIndex_ : 0;
+        const int candidateIndices[] = { center, center + 1, center - 1 };
+        for (int idx : candidateIndices) {
+            if (idx < 0 || idx >= n) continue;
+            const auto& entry = currentSetlist_->entries[static_cast<size_t>(idx)];
+            if (!entry.song.has_value() || entry.justClick) continue;
+
+            Song eff = buildEffectiveSongForEntry(entry);
+            if (!eff.tracks.empty()) {
+                songsToPreload.push_back(std::move(eff));
             }
-        } else if (!entry.song->tracks.empty()) {
-            songsInSet.push_back(*entry.song);
         }
     }
-    audioEngine_.preloadSetlist(*currentSetlist_->id, songsInSet);
+    audioEngine_.preloadSetlist(*currentSetlist_->id, songsToPreload);
 }
 
 void OpenSetView::populateSetPickerItems() {
@@ -835,11 +836,15 @@ void OpenSetView::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, 
     const int contentX = 28;
     const int contentW = std::max(0, width - contentX - 8);
 
-    // Title (full top row; show arrangement name when song has multiple arrangements + non-default transition tag)
+    // Title (full top row; show [Just click] or arrangement name when relevant + non-default transition tag)
     juce::String titleDisplay = songTitle;
-    if (entry.song.has_value() && entry.song->arrangements.size() > 1) {
-        if (const auto* arr = entry.getSelectedArrangement(); arr != nullptr && !arr->name.empty()) {
-            titleDisplay += "  [" + juce::String(arr->name) + "]";
+    if (entry.song.has_value() && !entry.song->arrangements.empty()) {
+        if (entry.justClick) {
+            titleDisplay += "  [Just click]";
+        } else if (entry.song->arrangements.size() > 1) {
+            if (const auto* arr = entry.getSelectedArrangement(); arr != nullptr && !arr->name.empty()) {
+                titleDisplay += "  [" + juce::String(arr->name) + "]";
+            }
         }
     }
     juce::String transBadge;
@@ -907,30 +912,43 @@ void OpenSetView::selectedRowsChanged(int lastRowSelected) {
         if (entry.song.has_value() && onSongSelectedForPlayback) {
             onSongSelectedForPlayback(buildEffectiveSongForEntry(entry));
         }
+        preloadCurrentSetlist();
     }
 }
 
-void OpenSetView::selectArrangementForCurrentSong(int64_t arrangementId) {
+void OpenSetView::selectArrangementForCurrentSong(std::optional<int64_t> arrangementId) {
     if (!currentSetlist_ || selectedEntryIndex_ < 0 ||
         selectedEntryIndex_ >= static_cast<int>(currentSetlist_->entries.size()))
         return;
 
     auto& entry = currentSetlist_->entries[static_cast<size_t>(selectedEntryIndex_)];
-    if (entry.arrangementId.has_value() && *entry.arrangementId == arrangementId) return;
+    const bool selectJustClick = !arrangementId.has_value();
+    if (selectJustClick) {
+        if (entry.justClick) return;
+    } else {
+        if (!entry.justClick && entry.arrangementId.has_value() && *entry.arrangementId == *arrangementId) return;
+    }
 
     const bool wasPlaying = audioEngine_.isPlaying() && !audioEngine_.isPaused();
     if (audioEngine_.isPlaying()) {
         audioEngine_.stop();
     }
 
-    entry.arrangementId = arrangementId;
-    entry.overrideTempo = std::nullopt; // Start cleanly at the newly selected arrangement's recorded tempo
-    entry.overrideKey = std::nullopt;   // Start cleanly in the newly selected arrangement's recorded key
+    if (selectJustClick) {
+        entry.justClick = true;
+    } else {
+        entry.justClick = false;
+        entry.arrangementId = *arrangementId;
+    }
+    entry.overrideTempo = std::nullopt;
+    entry.overrideKey = std::nullopt;
+    entry.overrideTimeSignature = std::nullopt;
     saveCurrentSetlist();
     entryListBox_.repaintRow(selectedEntryIndex_);
 
     if (entry.song.has_value() && onSongSelectedForPlayback) {
         onSongSelectedForPlayback(buildEffectiveSongForEntry(entry));
+        preloadCurrentSetlist();
         if (wasPlaying) {
             audioEngine_.play();
         }

@@ -56,6 +56,22 @@ private:
     std::vector<double> barPositions_;
     double waveformDurationFraction_ = 1.0;
     std::vector<SongSection> sections_;
+
+    // Offscreen Retina-aware cache for static waveform bars (avoids 512 fillRect calls every frame)
+    juce::Image waveformUnplayedCache_;
+    juce::Image waveformPlayedCache_;
+    uint64_t waveformCacheRev_ = 0;
+    uint64_t builtCacheRev_ = 0;
+    int builtCacheW_ = 0;
+    int builtCacheH_ = 0;
+    float builtCacheScale_ = 1.0f;
+    bool builtCacheIsExpanded_ = false;
+    bool builtCacheActiveIsCount_ = false;
+    int builtCacheBarCount_ = 0;
+    double builtCacheDurationBars_ = 0.0;
+    double builtCacheDurationFrac_ = 1.0;
+
+    void rebuildWaveformCache(int logicalW, int logicalH, float scale, bool isExpanded, bool activeIsCount, float durationFrac);
 };
 
 } // namespace tracks

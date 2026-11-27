@@ -6,9 +6,13 @@
 #include "../Models/Song.h"
 #include "../Models/SetlistEntry.h"
 #include "Metronome.h"
+#include "StreamingAudioTrack.h"
 #include "PitchShiftUtils.h"
 #include "SectionJumpUtils.h"
 #include <signalsmith-stretch.h>
+#include <array>
+#include <cmath>
+#include <cstdint>
 #include <vector>
 #include <memory>
 #include <atomic>
@@ -83,6 +87,7 @@ public:
     void setTrackMuted(int trackIndex, bool muted);
     void setTrackGain(int trackIndex, float gain);
     void setTrackOutputChannel(int trackIndex, int channel, bool stereoOutput = true);
+    void flushPendingWaveformRebuild();
 
     void setTempo(int tempo);
     void setOriginalTrackTempo(int originalTempo);
@@ -169,7 +174,7 @@ public:
 private:
     struct LoadedTrack {
         SongTrack track;
-        std::shared_ptr<const juce::AudioBuffer<float>> buffer;
+        std::shared_ptr<StreamingAudioTrack> stream;
         int64_t position = 0;
         float smoothedCorrelation = 0.0f;
         float monoGainL = 0.70710678f;
@@ -262,14 +267,17 @@ private:
     std::atomic<int> currentOutputChannels_{2};
     double currentSampleRate_ = 44100.0;
 
+    static constexpr int kMaxMeterChannels = 32;
     std::mutex audioMutex_;
-    std::mutex peakMutex_;
-    std::vector<float> outputPeaks_;
+    std::array<std::atomic<float>, kMaxMeterChannels> outputPeaksAtomic_{};
+    std::atomic<int> activePeakChannels_{2};
 
     std::mutex waveformMutex_;
     std::vector<float> waveformPeaks_;
     TimelineLayoutSnapshot timelineLayout_;
     std::atomic<uint64_t> waveformVersion_{0};
+    std::atomic<bool> waveformRebuildPending_{false};
+    std::atomic<int64_t> lastWaveformDirtyMs_{0};
 
     // Setlist-scoped decoded audio cache & async loader
     std::mutex cacheMutex_;
@@ -280,6 +288,18 @@ private:
     uint64_t preloadGeneration_ = 0;
     bool shuttingDown_ = false;
     std::thread loaderThread_;
+
+    // Background disk streaming thread & active stream registry
+    std::mutex streamControlMutex_;
+    std::condition_variable streamerCv_;
+    std::condition_variable streamerSyncCv_;
+    std::vector<std::shared_ptr<StreamingAudioTrack>> activeStreamTracks_;
+    bool streamerCloseReadersRequested_ = false;
+    bool streamerShuttingDown_ = false;
+    uint64_t streamerWakeSeq_ = 0;
+    uint64_t streamerSyncRequest_ = 0;
+    uint64_t streamerSyncCompleted_ = 0;
+    std::thread streamerThread_;
 
     juce::AudioBuffer<float> renderScratchBuffer_;
     juce::AudioBuffer<float> crossfadeScratchBuffer_;
@@ -317,6 +337,11 @@ private:
     std::vector<SongSection> activeSections_;
     std::mutex guideAssetsMutex_;
     void loaderLoop();
+    void streamerLoop();
+    void syncActiveStreamsLocked(bool notifyNow);
+    void notifyStreamer(bool closeReaders = false);
+    void waitForStreamerFlush();
+    void updateSectionPrefetchLocked(int targetSectionIndex);
     void enqueueSongLoadLocked(const Song& song, bool highPriority);
     void applyCachedAudio(const std::shared_ptr<CachedSongAudio>& cached, const Song* overrideSettings);
     void rebuildWaveformPeaksLocked();

@@ -4,6 +4,7 @@
 #include <set>
 #include <stdexcept>
 #include <iostream>
+#include <unordered_map>
 
 namespace tracks {
 
@@ -28,13 +29,13 @@ void DatabaseService::connect() {
         throw std::runtime_error("Failed to open SQLite database at " + dbPath_ + ": " + err);
     }
 
-    // Always enforce foreign keys
+    // Always enforce foreign keys and enable WAL mode for faster, smoother auto-saves
     char* errMsg = nullptr;
-    rc = sqlite3_exec(db_, "PRAGMA foreign_keys = ON;", nullptr, nullptr, &errMsg);
+    rc = sqlite3_exec(db_, "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;", nullptr, nullptr, &errMsg);
     if (rc != SQLITE_OK) {
         std::string err = errMsg ? errMsg : "Unknown error";
         sqlite3_free(errMsg);
-        throw std::runtime_error("Failed to enable foreign keys: " + err);
+        throw std::runtime_error("Failed to configure SQLite pragmas: " + err);
     }
 }
 
@@ -75,7 +76,17 @@ void DatabaseService::exportSnapshotToFile(const std::string& destPath) {
 
     rc = sqlite3_backup_step(backup, -1);
     int finishRc = sqlite3_backup_finish(backup);
+    if (rc == SQLITE_DONE && finishRc == SQLITE_OK) {
+        // Convert snapshot out of WAL mode so the single-file backup is self-contained
+        // and readable via SQLITE_OPEN_READONLY without -wal/-shm sidecar files.
+        char* errMsg = nullptr;
+        sqlite3_exec(destDb, "PRAGMA journal_mode = DELETE;", nullptr, nullptr, &errMsg);
+        if (errMsg) sqlite3_free(errMsg);
+    }
     sqlite3_close(destDb);
+    std::filesystem::remove(destPath + "-wal", ec);
+    std::filesystem::remove(destPath + "-shm", ec);
+    std::filesystem::remove(destPath + "-journal", ec);
 
     if (rc != SQLITE_DONE || finishRc != SQLITE_OK) {
         std::filesystem::remove(dst, ec);
@@ -132,7 +143,7 @@ void DatabaseService::replaceDatabaseFromFile(const std::string& srcPath) {
             if (rc != SQLITE_OK || !db_) {
                 throw std::runtime_error("Failed to open restored SQLite database.");
             }
-            executeSimple("PRAGMA foreign_keys = ON;");
+            executeSimple("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
             if (hadOriginal) {
                 fs::remove(rollbackPath, ec);
             }
@@ -145,7 +156,7 @@ void DatabaseService::replaceDatabaseFromFile(const std::string& srcPath) {
             sqlite3_open(dbPath_.c_str(), &db_);
             if (db_) {
                 char* errMsg = nullptr;
-                sqlite3_exec(db_, "PRAGMA foreign_keys = ON;", nullptr, nullptr, &errMsg);
+                sqlite3_exec(db_, "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;", nullptr, nullptr, &errMsg);
                 if (errMsg) sqlite3_free(errMsg);
             }
             throw;
@@ -386,6 +397,7 @@ void DatabaseService::ensureSchema() {
         "  override_key TEXT,"
         "  override_time_signature TEXT,"
         "  arrangement_id INTEGER,"
+        "  just_click INTEGER NOT NULL DEFAULT 0,"
         "  transition_mode INTEGER NOT NULL DEFAULT 0,"
         "  transition_crossfade_bars INTEGER NOT NULL DEFAULT 1,"
         "  FOREIGN KEY(setlist_id) REFERENCES setlists(id) ON DELETE CASCADE,"
@@ -406,6 +418,9 @@ void DatabaseService::ensureSchema() {
     if (!columnExists("setlist_items", "arrangement_id")) {
         executeSimple("ALTER TABLE setlist_items ADD COLUMN arrangement_id INTEGER REFERENCES arrangements(id) ON DELETE SET NULL;");
     }
+    if (!columnExists("setlist_items", "just_click")) {
+        executeSimple("ALTER TABLE setlist_items ADD COLUMN just_click INTEGER NOT NULL DEFAULT 0;");
+    }
     if (!columnExists("setlist_items", "transition_mode")) {
         executeSimple("ALTER TABLE setlist_items ADD COLUMN transition_mode INTEGER NOT NULL DEFAULT 0;");
     }
@@ -419,6 +434,13 @@ void DatabaseService::ensureSchema() {
         "  value TEXT NOT NULL"
         ");"
     );
+
+    // Indexes on foreign-key lookup columns to keep bulk & per-song queries fast
+    executeSimple("CREATE INDEX IF NOT EXISTS idx_arrangements_song_id ON arrangements(song_id);");
+    executeSimple("CREATE INDEX IF NOT EXISTS idx_tracks_song_id ON tracks(song_id);");
+    executeSimple("CREATE INDEX IF NOT EXISTS idx_song_sections_song_id ON song_sections(song_id);");
+    executeSimple("CREATE INDEX IF NOT EXISTS idx_tempo_points_song_id ON arrangement_tempo_points(song_id);");
+    executeSimple("CREATE INDEX IF NOT EXISTS idx_setlist_items_setlist_id ON setlist_items(setlist_id);");
 
     // One-time automatic migration: attach any legacy song tracks/sections with arrangement_id IS NULL
     // to a default "Main" arrangement inheriting that song's tempo, key, time signature, and click subdivisions.
@@ -1010,132 +1032,161 @@ std::vector<Song> DatabaseService::listSongs() {
     }
     sqlite3_finalize(stmt);
 
-    auto populateSongChildren = [this](Song& s) {
-        if (!s.id.has_value()) return;
-        const int64_t songId = *s.id;
+    if (songs.empty()) {
+        return songs;
+    }
 
-        const char* arrSql = "SELECT id, name, tempo, key, time_signature, click_eighths, click_sixteenths, click_eighths_gain, click_sixteenths_gain FROM arrangements WHERE song_id = ? ORDER BY order_index ASC, id ASC;";
+    // Bulk-load all child rows in 4 queries (eliminates 4*N N+1 queries as the library grows)
+    std::unordered_map<int64_t, size_t> songIndexById;
+    songIndexById.reserve(songs.size());
+    for (size_t i = 0; i < songs.size(); ++i) {
+        if (songs[i].id.has_value()) {
+            songIndexById[*songs[i].id] = i;
+        }
+    }
+
+    std::unordered_map<int64_t, std::pair<size_t, size_t>> arrLocById;
+    {
+        const char* arrSql = "SELECT id, song_id, name, tempo, key, time_signature, click_eighths, click_sixteenths, click_eighths_gain, click_sixteenths_gain FROM arrangements ORDER BY song_id ASC, order_index ASC, id ASC;";
         sqlite3_stmt* aStmt = nullptr;
         if (sqlite3_prepare_v2(db_, arrSql, -1, &aStmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(aStmt, 1, songId);
             while (sqlite3_step(aStmt) == SQLITE_ROW) {
+                int64_t songId = sqlite3_column_int64(aStmt, 1);
+                auto sIt = songIndexById.find(songId);
+                if (sIt == songIndexById.end()) continue;
+
                 SongArrangement arr;
                 arr.id = sqlite3_column_int64(aStmt, 0);
-                const unsigned char* name = sqlite3_column_text(aStmt, 1);
+                const unsigned char* name = sqlite3_column_text(aStmt, 2);
                 arr.name = name ? reinterpret_cast<const char*>(name) : "Main";
-                arr.tempo = sqlite3_column_int(aStmt, 2);
-                const unsigned char* k = sqlite3_column_text(aStmt, 3);
+                arr.tempo = sqlite3_column_int(aStmt, 3);
+                const unsigned char* k = sqlite3_column_text(aStmt, 4);
                 arr.key = k ? reinterpret_cast<const char*>(k) : "C";
-                const unsigned char* ts = sqlite3_column_text(aStmt, 4);
+                const unsigned char* ts = sqlite3_column_text(aStmt, 5);
                 arr.timeSignature = ts ? reinterpret_cast<const char*>(ts) : "4/4";
-                arr.clickEighths = sqlite3_column_int(aStmt, 5) != 0;
-                arr.clickSixteenths = sqlite3_column_int(aStmt, 6) != 0;
-                arr.clickEighthsGain = static_cast<float>(sqlite3_column_double(aStmt, 7));
-                arr.clickSixteenthsGain = static_cast<float>(sqlite3_column_double(aStmt, 8));
-                s.arrangements.push_back(std::move(arr));
+                arr.clickEighths = sqlite3_column_int(aStmt, 6) != 0;
+                arr.clickSixteenths = sqlite3_column_int(aStmt, 7) != 0;
+                arr.clickEighthsGain = static_cast<float>(sqlite3_column_double(aStmt, 8));
+                arr.clickSixteenthsGain = static_cast<float>(sqlite3_column_double(aStmt, 9));
+
+                auto& song = songs[sIt->second];
+                size_t arrIdx = song.arrangements.size();
+                arrLocById[*arr.id] = { sIt->second, arrIdx };
+                song.arrangements.push_back(std::move(arr));
             }
             sqlite3_finalize(aStmt);
         }
+    }
 
-        const char* trackSql = "SELECT id, name, file_path, output_channel, gain, muted, track_key, num_channels, stereo_output, arrangement_id FROM tracks WHERE song_id = ? ORDER BY output_channel ASC, id ASC;";
+    {
+        const char* trackSql = "SELECT id, song_id, name, file_path, output_channel, gain, muted, track_key, num_channels, stereo_output, arrangement_id FROM tracks ORDER BY song_id ASC, output_channel ASC, id ASC;";
         sqlite3_stmt* tStmt = nullptr;
         if (sqlite3_prepare_v2(db_, trackSql, -1, &tStmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(tStmt, 1, songId);
             while (sqlite3_step(tStmt) == SQLITE_ROW) {
+                int64_t songId = sqlite3_column_int64(tStmt, 1);
+                auto sIt = songIndexById.find(songId);
+                if (sIt == songIndexById.end()) continue;
+
                 SongTrack t;
                 t.id = sqlite3_column_int64(tStmt, 0);
-                const unsigned char* name = sqlite3_column_text(tStmt, 1);
+                const unsigned char* name = sqlite3_column_text(tStmt, 2);
                 t.name = name ? reinterpret_cast<const char*>(name) : "";
-                const unsigned char* fp = sqlite3_column_text(tStmt, 2);
+                const unsigned char* fp = sqlite3_column_text(tStmt, 3);
                 t.filePath = fp ? reinterpret_cast<const char*>(fp) : "";
-                t.outputChannel = sqlite3_column_int(tStmt, 3);
-                t.gain = static_cast<float>(sqlite3_column_double(tStmt, 4));
-                t.muted = sqlite3_column_int(tStmt, 5) != 0;
-                const unsigned char* tk = sqlite3_column_text(tStmt, 6);
+                t.outputChannel = sqlite3_column_int(tStmt, 4);
+                t.gain = static_cast<float>(sqlite3_column_double(tStmt, 5));
+                t.muted = sqlite3_column_int(tStmt, 6) != 0;
+                const unsigned char* tk = sqlite3_column_text(tStmt, 7);
                 t.trackKey = tk ? reinterpret_cast<const char*>(tk) : "";
-                t.numChannels = sqlite3_column_int(tStmt, 7);
-                t.stereoOutput = sqlite3_column_int(tStmt, 8) != 0;
+                t.numChannels = sqlite3_column_int(tStmt, 8);
+                t.stereoOutput = sqlite3_column_int(tStmt, 9) != 0;
+
                 bool placed = false;
-                if (sqlite3_column_type(tStmt, 9) != SQLITE_NULL) {
-                    int64_t arrId = sqlite3_column_int64(tStmt, 9);
-                    for (auto& arr : s.arrangements) {
-                        if (arr.id.has_value() && *arr.id == arrId) {
-                            arr.tracks.push_back(t);
-                            placed = true;
-                            break;
-                        }
+                if (sqlite3_column_type(tStmt, 10) != SQLITE_NULL) {
+                    int64_t arrId = sqlite3_column_int64(tStmt, 10);
+                    auto aIt = arrLocById.find(arrId);
+                    if (aIt != arrLocById.end() && aIt->second.first == sIt->second) {
+                        songs[aIt->second.first].arrangements[aIt->second.second].tracks.push_back(std::move(t));
+                        placed = true;
                     }
                 }
                 if (!placed) {
-                    if (!s.arrangements.empty()) s.arrangements.front().tracks.push_back(t);
-                    else s.tracks.push_back(t);
+                    auto& song = songs[sIt->second];
+                    if (!song.arrangements.empty()) song.arrangements.front().tracks.push_back(std::move(t));
+                    else song.tracks.push_back(std::move(t));
                 }
             }
             sqlite3_finalize(tStmt);
         }
+    }
 
-        const char* secSql = "SELECT id, name, length_bars, order_index, arrangement_id FROM song_sections WHERE song_id = ? ORDER BY order_index ASC, id ASC;";
+    {
+        const char* secSql = "SELECT id, song_id, name, length_bars, order_index, arrangement_id FROM song_sections ORDER BY song_id ASC, order_index ASC, id ASC;";
         sqlite3_stmt* sStmt = nullptr;
         if (sqlite3_prepare_v2(db_, secSql, -1, &sStmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(sStmt, 1, songId);
             while (sqlite3_step(sStmt) == SQLITE_ROW) {
+                int64_t songId = sqlite3_column_int64(sStmt, 1);
+                auto sIt = songIndexById.find(songId);
+                if (sIt == songIndexById.end()) continue;
+
                 SongSection sec;
                 sec.id = sqlite3_column_int64(sStmt, 0);
-                const unsigned char* name = sqlite3_column_text(sStmt, 1);
+                const unsigned char* name = sqlite3_column_text(sStmt, 2);
                 sec.name = name ? reinterpret_cast<const char*>(name) : "";
-                sec.lengthBars = std::max(1, sqlite3_column_int(sStmt, 2));
-                sec.orderIndex = sqlite3_column_int(sStmt, 3);
+                sec.lengthBars = std::max(1, sqlite3_column_int(sStmt, 3));
+                sec.orderIndex = sqlite3_column_int(sStmt, 4);
+
                 bool placed = false;
-                if (sqlite3_column_type(sStmt, 4) != SQLITE_NULL) {
-                    int64_t arrId = sqlite3_column_int64(sStmt, 4);
-                    for (auto& arr : s.arrangements) {
-                        if (arr.id.has_value() && *arr.id == arrId) {
-                            arr.sections.push_back(sec);
-                            placed = true;
-                            break;
-                        }
+                if (sqlite3_column_type(sStmt, 5) != SQLITE_NULL) {
+                    int64_t arrId = sqlite3_column_int64(sStmt, 5);
+                    auto aIt = arrLocById.find(arrId);
+                    if (aIt != arrLocById.end() && aIt->second.first == sIt->second) {
+                        songs[aIt->second.first].arrangements[aIt->second.second].sections.push_back(std::move(sec));
+                        placed = true;
                     }
                 }
                 if (!placed) {
-                    if (!s.arrangements.empty()) s.arrangements.front().sections.push_back(sec);
-                    else s.sections.push_back(sec);
+                    auto& song = songs[sIt->second];
+                    if (!song.arrangements.empty()) song.arrangements.front().sections.push_back(std::move(sec));
+                    else song.sections.push_back(std::move(sec));
                 }
             }
             sqlite3_finalize(sStmt);
         }
+    }
 
-        const char* tempoSql = "SELECT id, bar, beat, bpm, ramp_bars, order_index, arrangement_id FROM arrangement_tempo_points WHERE song_id = ? ORDER BY bar ASC, beat ASC, order_index ASC, id ASC;";
+    {
+        const char* tempoSql = "SELECT id, song_id, bar, beat, bpm, ramp_bars, order_index, arrangement_id FROM arrangement_tempo_points ORDER BY song_id ASC, bar ASC, beat ASC, order_index ASC, id ASC;";
         sqlite3_stmt* tpStmt = nullptr;
         if (sqlite3_prepare_v2(db_, tempoSql, -1, &tpStmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int64(tpStmt, 1, songId);
             while (sqlite3_step(tpStmt) == SQLITE_ROW) {
+                int64_t songId = sqlite3_column_int64(tpStmt, 1);
+                auto sIt = songIndexById.find(songId);
+                if (sIt == songIndexById.end()) continue;
+
                 TempoPoint pt;
                 pt.id = sqlite3_column_int64(tpStmt, 0);
-                pt.bar = std::max(1, sqlite3_column_int(tpStmt, 1));
-                pt.beat = std::max(1.0, sqlite3_column_double(tpStmt, 2));
-                pt.bpm = std::clamp(sqlite3_column_double(tpStmt, 3), 20.0, 300.0);
-                pt.rampBars = std::max(0.0, sqlite3_column_double(tpStmt, 4));
-                pt.orderIndex = sqlite3_column_int(tpStmt, 5);
-                int64_t arrId = sqlite3_column_int64(tpStmt, 6);
-                for (auto& arr : s.arrangements) {
-                    if (arr.id.has_value() && *arr.id == arrId) {
-                        arr.tempoPoints.push_back(pt);
-                        break;
-                    }
+                pt.bar = std::max(1, sqlite3_column_int(tpStmt, 2));
+                pt.beat = std::max(1.0, sqlite3_column_double(tpStmt, 3));
+                pt.bpm = std::clamp(sqlite3_column_double(tpStmt, 4), 20.0, 300.0);
+                pt.rampBars = std::max(0.0, sqlite3_column_double(tpStmt, 5));
+                pt.orderIndex = sqlite3_column_int(tpStmt, 6);
+                int64_t arrId = sqlite3_column_int64(tpStmt, 7);
+                auto aIt = arrLocById.find(arrId);
+                if (aIt != arrLocById.end() && aIt->second.first == sIt->second) {
+                    songs[aIt->second.first].arrangements[aIt->second.second].tempoPoints.push_back(std::move(pt));
                 }
             }
             sqlite3_finalize(tpStmt);
         }
+    }
 
+    for (auto& s : songs) {
         if (!s.arrangements.empty()) {
             s.tracks = s.arrangements.front().tracks;
             s.sections = s.arrangements.front().sections;
             s.tempoPoints = s.arrangements.front().tempoPoints;
         }
-    };
-
-    for (auto& s : songs) {
-        populateSongChildren(s);
     }
 
     return songs;
@@ -1361,7 +1412,7 @@ Setlist DatabaseService::saveSetlist(Setlist setlist) {
 
         // Insert items
         sqlite3_stmt* itemStmt = nullptr;
-        const char* insertItemSql = "INSERT INTO setlist_items (setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id, transition_mode, transition_crossfade_bars) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        const char* insertItemSql = "INSERT INTO setlist_items (setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id, just_click, transition_mode, transition_crossfade_bars) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
         if (sqlite3_prepare_v2(db_, insertItemSql, -1, &itemStmt, nullptr) != SQLITE_OK)
             throw std::runtime_error("Prepare failed for INSERT INTO setlist_items");
 
@@ -1391,8 +1442,9 @@ Setlist DatabaseService::saveSetlist(Setlist setlist) {
             else
                 sqlite3_bind_null(itemStmt, 7);
 
-            sqlite3_bind_int(itemStmt, 8, static_cast<int>(entry.transitionMode));
-            sqlite3_bind_int(itemStmt, 9, clampCrossfadeBars(entry.transitionCrossfadeBars));
+            sqlite3_bind_int(itemStmt, 8, entry.justClick ? 1 : 0);
+            sqlite3_bind_int(itemStmt, 9, static_cast<int>(entry.transitionMode));
+            sqlite3_bind_int(itemStmt, 10, clampCrossfadeBars(entry.transitionCrossfadeBars));
 
             if (sqlite3_step(itemStmt) == SQLITE_DONE) {
                 entry.id = sqlite3_last_insert_rowid(db_);
@@ -1416,7 +1468,7 @@ std::vector<SetlistEntry> DatabaseService::listSetlistEntries(int64_t setlistId)
     std::vector<SetlistEntry> entries;
     {
         std::lock_guard<std::mutex> lock(dbMutex_);
-        const char* sql = "SELECT id, setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id, transition_mode, transition_crossfade_bars FROM setlist_items WHERE setlist_id = ? ORDER BY order_index ASC, id ASC;";
+        const char* sql = "SELECT id, setlist_id, song_id, order_index, override_tempo, override_key, override_time_signature, arrangement_id, just_click, transition_mode, transition_crossfade_bars FROM setlist_items WHERE setlist_id = ? ORDER BY order_index ASC, id ASC;";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
             sqlite3_bind_int64(stmt, 1, setlistId);
@@ -1438,11 +1490,12 @@ std::vector<SetlistEntry> DatabaseService::listSetlistEntries(int64_t setlistId)
                 }
                 if (sqlite3_column_type(stmt, 7) != SQLITE_NULL)
                     e.arrangementId = sqlite3_column_int64(stmt, 7);
+                e.justClick = (sqlite3_column_type(stmt, 8) != SQLITE_NULL && sqlite3_column_int(stmt, 8) != 0);
                 int rawMode = 0;
-                if (sqlite3_column_type(stmt, 8) != SQLITE_NULL)
-                    rawMode = sqlite3_column_int(stmt, 8);
+                if (sqlite3_column_type(stmt, 9) != SQLITE_NULL)
+                    rawMode = sqlite3_column_int(stmt, 9);
                 e.transitionMode = clampTransitionMode(rawMode);
-                int rawXf = (sqlite3_column_type(stmt, 9) != SQLITE_NULL) ? sqlite3_column_int(stmt, 9) : 1;
+                int rawXf = (sqlite3_column_type(stmt, 10) != SQLITE_NULL) ? sqlite3_column_int(stmt, 10) : 1;
                 if (rawMode == 4 && rawXf == 1) rawXf = 2; // Preserve legacy Crossfade2Bar rows
                 e.transitionCrossfadeBars = clampCrossfadeBars(rawXf);
                 entries.push_back(e);

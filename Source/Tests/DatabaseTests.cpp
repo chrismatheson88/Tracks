@@ -236,6 +236,24 @@ void runDatabaseTests() {
     assert(tracklessEntry.getEffectiveKey() == "D");
     assert(tracklessEntry.getEffectiveTimeSignature() == "3/4");
 
+    // "Just click" mode persisted on a setlist entry ignores arrangements and uses song base settings
+    tracks::Setlist justClickSet;
+    justClickSet.name = "Click Only Set";
+    tracks::SetlistEntry jcEntry;
+    jcEntry.songId = *savedWithTrackless.id;
+    jcEntry.orderIndex = 0;
+    jcEntry.arrangementId = loudId;
+    jcEntry.justClick = true;
+    justClickSet.entries.push_back(jcEntry);
+    auto savedJcSet = db.saveSetlist(justClickSet);
+    auto loadedJcSet = db.loadSetlist(*savedJcSet.id);
+    assert(loadedJcSet.has_value());
+    assert(loadedJcSet->entries.size() == 1);
+    assert(loadedJcSet->entries[0].justClick == true);
+    assert(loadedJcSet->entries[0].getSelectedArrangement() == nullptr);
+    assert(loadedJcSet->entries[0].getEffectiveTempo() == savedWithTrackless.tempo);
+    assert(loadedJcSet->entries[0].getEffectiveKey() == savedWithTrackless.key);
+
     // Test 3: Save and load Setlist with overrides
     std::cout << "[Test] Saving Setlist with overrides..." << std::endl;
     tracks::Setlist set;

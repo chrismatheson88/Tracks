@@ -11,6 +11,16 @@ OutputMeterComponent::OutputMeterComponent() {
 }
 
 void OutputMeterComponent::updatePeaks(const std::vector<float>& peaks) {
+    bool changed = (peaks.size() != peaks_.size());
+    if (!changed) {
+        for (size_t i = 0; i < peaks.size(); ++i) {
+            if (std::abs(peaks[i] - peaks_[i]) > 0.0005f) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) return;
     peaks_ = peaks;
     repaint();
 }

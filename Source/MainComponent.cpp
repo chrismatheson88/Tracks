@@ -191,7 +191,7 @@ MainComponent::MainComponent() {
         if (transport_) {
             transport_->setSongInfo("", "", 120, "C", "4/4");
             transport_->syncTracksAvailability(std::nullopt, {}, false, {});
-            transport_->syncArrangements({}, std::nullopt, 120, "C", "4/4", false, false, 1.0f, 1.0f);
+            transport_->syncArrangements({}, std::nullopt, true, 120, "C", "4/4", false, false, 1.0f, 1.0f);
             transport_->syncClickAndGuideChannels(audioEngine_->getClickChannel(), audioEngine_->getGuideChannel());
             if (openSetView_) {
                 transport_->setSongNavigationState(openSetView_->canSelectPreviousSong(), openSetView_->canSelectNextSong());
@@ -259,7 +259,7 @@ MainComponent::MainComponent() {
             openSetView_->syncSongClickSubdivisions(songId, arrangementId, eighths, sixteenths, eighthsGain, sixteenthsGain);
         }
     };
-    transport_->onArrangementChanged = [this](int64_t arrangementId) {
+    transport_->onArrangementChanged = [this](std::optional<int64_t> arrangementId) {
         if (activeView_ == ActiveView::OpenSet && openSetView_) {
             openSetView_->selectArrangementForCurrentSong(arrangementId);
         }
@@ -314,6 +314,7 @@ void MainComponent::playSong(const Song& song) {
     }
     transport_->syncArrangements(song.arrangements,
                                  song.activeArrangementId,
+                                 song.justClickMode,
                                  clickOnlyTempo,
                                  clickOnlyKey,
                                  clickOnlySig,

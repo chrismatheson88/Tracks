@@ -66,6 +66,8 @@ target_sources(Tracks PRIVATE
     Source/Database/DatabaseService.cpp
     Source/Audio/AudioEngine.h
     Source/Audio/AudioEngine.cpp
+    Source/Audio/StreamingAudioTrack.h
+    Source/Audio/StreamingAudioTrack.cpp
     Source/Audio/Metronome.h
     Source/Audio/Metronome.cpp
     Source/Audio/PitchShiftUtils.h
@@ -102,6 +104,7 @@ target_include_directories(Tracks PRIVATE
 if(NOT MSVC)
     set_source_files_properties(
         Source/Audio/AudioEngine.cpp
+        Source/Audio/StreamingAudioTrack.cpp
         Source/Audio/Metronome.cpp
         PROPERTIES COMPILE_OPTIONS "-O3"
     )
@@ -136,6 +139,7 @@ target_link_libraries(DatabaseTests PRIVATE SQLite3::SQLite3)
 add_executable(AudioEngineTests
     Source/Tests/AudioEngineTests.cpp
     Source/Audio/Metronome.cpp
+    Source/Audio/StreamingAudioTrack.cpp
     Source/Database/DatabaseService.cpp
     Source/Services/AudioAttachmentService.cpp
     Source/Services/LibraryBackupService.cpp

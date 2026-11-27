@@ -23,7 +23,7 @@ public:
     int getCurrentSongCrossfadeBars() const;
     void setCurrentSongTransition(SongTransitionMode mode, int crossfadeBars);
     void executeSongTransition(AudioEngine::TransitionTrigger trigger);
-    void selectArrangementForCurrentSong(int64_t arrangementId);
+    void selectArrangementForCurrentSong(std::optional<int64_t> arrangementId);
     void applySongParameters(int tempo, const std::string& key, const std::string& timeSignature);
     void syncSongClickSubdivisions(int64_t songId,
                                    std::optional<int64_t> arrangementId,

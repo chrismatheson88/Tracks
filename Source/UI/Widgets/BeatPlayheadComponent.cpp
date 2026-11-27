@@ -11,18 +11,77 @@ BeatPlayheadComponent::BeatPlayheadComponent() {
 
 void BeatPlayheadComponent::setWaveformData(std::vector<float> peaks) {
     waveformPeaks_ = std::move(peaks);
+    ++waveformCacheRev_;
     repaint();
 }
 
 void BeatPlayheadComponent::setTimelineLayout(std::vector<double> barPositions, double waveformDurationFraction) {
     barPositions_ = std::move(barPositions);
     waveformDurationFraction_ = std::clamp(waveformDurationFraction, 0.0, 1.0);
+    ++waveformCacheRev_;
     repaint();
 }
 
 void BeatPlayheadComponent::setSections(std::vector<SongSection> sections) {
     sections_ = std::move(sections);
     repaint();
+}
+
+void BeatPlayheadComponent::rebuildWaveformCache(int logicalW,
+                                                 int logicalH,
+                                                 float scale,
+                                                 bool isExpanded,
+                                                 bool activeIsCount,
+                                                 float durationFrac) {
+    const int physW = std::max(1, static_cast<int>(std::ceil(static_cast<float>(logicalW) * scale)));
+    const int physH = std::max(1, static_cast<int>(std::ceil(static_cast<float>(logicalH) * scale)));
+
+    waveformUnplayedCache_ = juce::Image(juce::Image::ARGB, physW, physH, true);
+    waveformPlayedCache_ = juce::Image(juce::Image::ARGB, physW, physH, true);
+
+    if (!waveformPeaks_.empty() && logicalW > 0 && logicalH > 0) {
+        juce::Graphics gUnplayed(waveformUnplayedCache_);
+        juce::Graphics gPlayed(waveformPlayedCache_);
+        gUnplayed.addTransform(juce::AffineTransform::scale(scale));
+        gPlayed.addTransform(juce::AffineTransform::scale(scale));
+
+        const float midY = static_cast<float>(logicalH) * 0.5f;
+        const float waveformW = std::max(1.0f, static_cast<float>(logicalW) * durationFrac);
+        const float maxHalfH = std::max(2.0f, (static_cast<float>(logicalH) - 6.0f) * 0.46f);
+        const int numBins = static_cast<int>(waveformPeaks_.size());
+        const int colStep = isExpanded ? 2 : 1;
+        const float barDrawW = isExpanded ? 1.5f : 1.0f;
+
+        const juce::Colour unplayedCol = AppTheme::primaryBlue.withAlpha(0.65f);
+        const juce::Colour playedCol = activeIsCount ? AppTheme::warningAmber.withAlpha(0.85f)
+                                                     : AppTheme::accentGreen.withAlpha(0.90f);
+        gUnplayed.setColour(unplayedCol);
+        gPlayed.setColour(playedCol);
+
+        for (float dx = 0.0f; dx < waveformW; dx += static_cast<float>(colStep)) {
+            int binStart = std::clamp(static_cast<int>((dx / waveformW) * static_cast<float>(numBins)), 0, numBins - 1);
+            int binEnd = std::clamp(static_cast<int>(((dx + static_cast<float>(colStep)) / waveformW) * static_cast<float>(numBins)), binStart + 1, numBins);
+
+            float peak = 0.0f;
+            for (int bi = binStart; bi < binEnd; ++bi) {
+                peak = std::max(peak, waveformPeaks_[static_cast<size_t>(bi)]);
+            }
+
+            const float halfH = std::max(1.0f, peak * maxHalfH);
+            gUnplayed.fillRect(dx, midY - halfH, barDrawW, halfH * 2.0f);
+            gPlayed.fillRect(dx, midY - halfH, barDrawW, halfH * 2.0f);
+        }
+    }
+
+    builtCacheRev_ = waveformCacheRev_;
+    builtCacheW_ = logicalW;
+    builtCacheH_ = logicalH;
+    builtCacheScale_ = scale;
+    builtCacheIsExpanded_ = isExpanded;
+    builtCacheActiveIsCount_ = activeIsCount;
+    builtCacheBarCount_ = trackBarCount_;
+    builtCacheDurationBars_ = trackDurationBars_;
+    builtCacheDurationFrac_ = static_cast<double>(durationFrac);
 }
 
 void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
@@ -41,10 +100,38 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
                                            int selectedStartSectionIndex,
                                            bool isSectionStartCountIn,
                                            bool clickLoopEnabled) {
-    totalBarsElapsed_ = std::max(0.0, totalBarsElapsed);
+    const double clampedBars = std::max(0.0, totalBarsElapsed);
+    const int clampedBeatsPerBar = std::max(1, beatsPerBar);
+    const double clampedDurBars = std::max(0.0, trackDurationBars);
+    const int clampedBarCount = std::max(0, trackBarCount);
+
+    const bool barsChanged = isPlaying
+                                 ? (std::abs(clampedBars - totalBarsElapsed_) > 1e-4)
+                                 : (clampedBars != totalBarsElapsed_);
+    const bool stateChanged =
+        barsChanged ||
+        currentBeatInBar != currentBeatInBar_ ||
+        currentBar != currentBar_ ||
+        clampedBeatsPerBar != beatsPerBar_ ||
+        isPlaying != isPlaying_ ||
+        isPaused != isPaused_ ||
+        isCompound != isCompound_ ||
+        showTracksWaveform != showTracksWaveform_ ||
+        isLoadingTracks != isLoadingTracks_ ||
+        hasLeadingCountSection != hasLeadingCountSection_ ||
+        queuedSectionIndex != queuedSectionIndex_ ||
+        selectedStartSectionIndex != selectedStartSectionIndex_ ||
+        isSectionStartCountIn != isSectionStartCountIn_ ||
+        clickLoopEnabled != clickLoopEnabled_ ||
+        std::abs(clampedDurBars - trackDurationBars_) > 1e-4 ||
+        clampedBarCount != trackBarCount_;
+
+    if (!stateChanged) return;
+
+    totalBarsElapsed_ = clampedBars;
     currentBeatInBar_ = currentBeatInBar;
     currentBar_ = currentBar;
-    beatsPerBar_ = std::max(1, beatsPerBar);
+    beatsPerBar_ = clampedBeatsPerBar;
     isPlaying_ = isPlaying;
     isPaused_ = isPaused;
     isCompound_ = isCompound;
@@ -55,8 +142,8 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
     selectedStartSectionIndex_ = selectedStartSectionIndex;
     isSectionStartCountIn_ = isSectionStartCountIn;
     clickLoopEnabled_ = clickLoopEnabled;
-    trackDurationBars_ = std::max(0.0, trackDurationBars);
-    trackBarCount_ = std::max(0, trackBarCount);
+    trackDurationBars_ = clampedDurBars;
+    trackBarCount_ = clampedBarCount;
     repaint();
 }
 
@@ -427,7 +514,7 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
             }
         }
 
-        // Draw summed waveform peaks when backing tracks exist, or a clean played-progress tint for trackless arrangements
+        // Draw summed waveform peaks from offscreen cache (or played-progress tint for trackless arrangements)
         if (!waveformPeaks_.empty()) {
             const float midY = waveTopY + waveH * 0.5f;
             g.setColour(AppTheme::borderCol.withAlpha(0.35f));
@@ -436,28 +523,40 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
             const float durationFrac = hasNonUniformBars
                                            ? static_cast<float>(waveformDurationFraction_)
                                            : std::clamp(static_cast<float>(trackDurationBars_ / static_cast<double>(trackBarCount_)), 0.0f, 1.0f);
-            const float waveformW = std::max(1.0f, tracksW * durationFrac);
-            const float maxHalfH = std::max(2.0f, (waveH - 6.0f) * 0.46f);
-            const int numBins = static_cast<int>(waveformPeaks_.size());
-            const int colStep = isExpanded ? 2 : 1;
-            const float barDrawW = isExpanded ? 1.5f : 1.0f;
+            const int logicalW = std::max(1, static_cast<int>(std::ceil(tracksW)));
+            const int logicalH = std::max(1, static_cast<int>(std::ceil(waveH)));
+            const float scale = std::clamp(g.getInternalContext().getPhysicalPixelScaleFactor(), 1.0f, 2.0f);
 
-            for (float dx = 0.0f; dx < waveformW; dx += static_cast<float>(colStep)) {
-                int binStart = std::clamp(static_cast<int>((dx / waveformW) * static_cast<float>(numBins)), 0, numBins - 1);
-                int binEnd = std::clamp(static_cast<int>(((dx + static_cast<float>(colStep)) / waveformW) * static_cast<float>(numBins)), binStart + 1, numBins);
+            const bool cacheStale =
+                !waveformUnplayedCache_.isValid() ||
+                builtCacheRev_ != waveformCacheRev_ ||
+                builtCacheW_ != logicalW ||
+                builtCacheH_ != logicalH ||
+                std::abs(builtCacheScale_ - scale) > 0.01f ||
+                builtCacheIsExpanded_ != isExpanded ||
+                builtCacheActiveIsCount_ != activeIsCount ||
+                builtCacheBarCount_ != trackBarCount_ ||
+                std::abs(builtCacheDurationBars_ - trackDurationBars_) > 1e-4 ||
+                std::abs(builtCacheDurationFrac_ - static_cast<double>(durationFrac)) > 1e-4;
 
-                float peak = 0.0f;
-                for (int bi = binStart; bi < binEnd; ++bi) {
-                    peak = std::max(peak, waveformPeaks_[static_cast<size_t>(bi)]);
-                }
+            if (cacheStale) {
+                rebuildWaveformCache(logicalW, logicalH, scale, isExpanded, activeIsCount, durationFrac);
+            }
 
-                float halfH = std::max(1.0f, peak * maxHalfH);
-                float drawX = tracksX + dx;
-                bool isPlayed = hasActivePosition && !inPrependedCountIn && (drawX <= playheadX);
-                juce::Colour playedCol = activeIsCount ? AppTheme::warningAmber.withAlpha(0.85f)
-                                                       : AppTheme::accentGreen.withAlpha(0.90f);
-                g.setColour(isPlayed ? playedCol : AppTheme::primaryBlue.withAlpha(0.65f));
-                g.fillRect(drawX, midY - halfH, barDrawW, halfH * 2.0f);
+            const juce::Rectangle<float> waveDest(tracksX, waveTopY, static_cast<float>(logicalW), static_cast<float>(logicalH));
+            const float splitX = (hasActivePosition && !inPrependedCountIn)
+                                     ? std::clamp(playheadX, tracksX, tracksX + static_cast<float>(logicalW))
+                                     : tracksX;
+
+            if (splitX > tracksX) {
+                juce::Graphics::ScopedSaveState s(g);
+                g.reduceClipRegion(juce::Rectangle<float>(tracksX, waveTopY, splitX - tracksX, static_cast<float>(logicalH)).toNearestInt());
+                g.drawImage(waveformPlayedCache_, waveDest);
+            }
+            if (splitX < tracksX + static_cast<float>(logicalW)) {
+                juce::Graphics::ScopedSaveState s(g);
+                g.reduceClipRegion(juce::Rectangle<float>(splitX, waveTopY, tracksX + static_cast<float>(logicalW) - splitX, static_cast<float>(logicalH)).toNearestInt());
+                g.drawImage(waveformUnplayedCache_, waveDest);
             }
         } else if (hasActivePosition && !inPrependedCountIn && playheadX > tracksX) {
             const float trailW = std::min(tracksW, playheadX - tracksX);
