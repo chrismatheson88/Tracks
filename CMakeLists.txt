@@ -62,6 +62,7 @@ target_sources(Tracks PRIVATE
     Source/Models/SongTrack.h
     Source/Models/Setlist.h
     Source/Models/SetlistEntry.h
+    Source/Models/MidiBinding.h
     Source/Database/DatabaseService.h
     Source/Database/DatabaseService.cpp
     Source/Audio/AudioEngine.h
@@ -78,6 +79,8 @@ target_sources(Tracks PRIVATE
     Source/Services/AudioAttachmentService.cpp
     Source/Services/LibraryBackupService.h
     Source/Services/LibraryBackupService.cpp
+    Source/Services/ControlSurfaceService.h
+    Source/Services/ControlSurfaceService.cpp
     Source/UI/Widgets/BeatPlayheadComponent.h
     Source/UI/Widgets/BeatPlayheadComponent.cpp
     Source/UI/Widgets/CalendarPopupComponent.h

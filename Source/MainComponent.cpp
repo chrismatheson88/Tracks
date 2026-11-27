@@ -127,6 +127,8 @@ private:
 MainComponent::MainComponent() {
     juce::LookAndFeel::setDefaultLookAndFeel(&theme_);
     setOpaque(true);
+    setWantsKeyboardFocus(true);
+    addKeyListener(this);
 
     // Database path: locate tracks_library.sqlite3 in project root
     auto dbPath = (AudioAttachmentService::getProjectRoot() / "tracks_library.sqlite3").string();
@@ -138,6 +140,12 @@ MainComponent::MainComponent() {
         if (activeView_ == ActiveView::OpenSet && openSetView_) {
             openSetView_->executeSongTransition(trigger);
         }
+    };
+
+    // Keyboard & MIDI Controller Service
+    controlSurface_ = std::make_unique<ControlSurfaceService>(*db_);
+    controlSurface_->onActionTriggered = [this](ControlAction action) {
+        executeControlAction(action);
     };
 
     // Brand Logo & Label
@@ -162,6 +170,7 @@ MainComponent::MainComponent() {
     setupNavTab(navSettingsButton_, "Settings", AppTheme::tabSettingsAccent, AppTheme::pageBgSettings, ActiveView::Settings);
 
     relaunchButton_.setColour(juce::TextButton::buttonColourId, AppTheme::bgPanel);
+    relaunchButton_.setWantsKeyboardFocus(false);
     relaunchButton_.onClick = [this]() { relaunchApp(); };
     addAndMakeVisible(relaunchButton_);
 
@@ -183,8 +192,21 @@ MainComponent::MainComponent() {
     };
     addChildComponent(openSetView_.get());
 
-    settingsView_ = std::make_unique<SettingsView>(*db_, *audioEngine_);
+    settingsView_ = std::make_unique<SettingsView>(*db_, *audioEngine_, *controlSurface_);
+    const std::string announceSetting = db_->getAppSetting("audio.announce_song_name", "1");
+    announceSongName_ = (announceSetting != "0" && announceSetting != "false");
+    settingsView_->onAnnounceSongNameChanged = [this](bool enabled) {
+        announceSongName_ = enabled;
+        if (!enabled && audioEngine_) {
+            audioEngine_->stopGuideAnnouncement();
+        }
+    };
     settingsView_->onLibraryImported = [this]() {
+        suppressSongAnnouncement_ = true;
+        lastAnnouncedSongKey_.clear();
+        if (controlSurface_) controlSurface_->reloadFromDatabase();
+        const std::string restoredAnnounce = db_->getAppSetting("audio.announce_song_name", "1");
+        announceSongName_ = (restoredAnnounce != "0" && restoredAnnounce != "false");
         if (libraryView_) libraryView_->reloadAfterImport();
         if (openSetView_) openSetView_->refreshSetlists();
         if (settingsView_) settingsView_->refreshSettings();
@@ -197,6 +219,7 @@ MainComponent::MainComponent() {
                 transport_->setSongNavigationState(openSetView_->canSelectPreviousSong(), openSetView_->canSelectNextSong());
             }
         }
+        suppressSongAnnouncement_ = false;
     };
     addChildComponent(settingsView_.get());
 
@@ -285,11 +308,17 @@ MainComponent::MainComponent() {
     addAndMakeVisible(transport_.get());
 
     switchView(ActiveView::Library);
+    suppressSongAnnouncement_ = false;
     setSize(1080, 720);
 }
 
 void MainComponent::playSong(const Song& song) {
     audioEngine_->loadSong(song);
+    const std::string songKey = song.id.has_value() ? std::to_string(*song.id) : song.title;
+    if (!suppressSongAnnouncement_ && announceSongName_ && !song.title.empty() && songKey != lastAnnouncedSongKey_) {
+        audioEngine_->speakGuideText(song.title);
+    }
+    lastAnnouncedSongKey_ = songKey;
     transport_->setSongInfo(song.title, song.artist, song.tempo, song.key, song.timeSignature);
     transport_->syncTracksAvailability(song.id, song.tracks, audioEngine_->hasLoadedTracks(), song.sections);
     transport_->syncClickSubdivisions(song.id, song.clickEighths, song.clickSixteenths, song.clickEighthsGain, song.clickSixteenthsGain);
@@ -359,11 +388,104 @@ void MainComponent::switchView(ActiveView view) {
         settingsView_->refreshSettings();
     }
 
+    if (activeView_ != ActiveView::Settings && controlSurface_) {
+        controlSurface_->cancelMidiLearn();
+        controlSurface_->cancelKeyLearn();
+    }
+
     updateNavButtonStyles();
     resized();
 }
 
-MainComponent::~MainComponent() = default;
+MainComponent::~MainComponent() {
+    removeKeyListener(this);
+}
+
+void MainComponent::executeControlAction(ControlAction action) {
+    if (!audioEngine_) return;
+    switch (action) {
+        case ControlAction::PlayPause:
+            if (!audioEngine_->isPlaying()) {
+                audioEngine_->play();
+            } else if (audioEngine_->isPaused()) {
+                audioEngine_->resume();
+            } else {
+                audioEngine_->pause();
+            }
+            break;
+        case ControlAction::Stop:
+            audioEngine_->stop();
+            break;
+        case ControlAction::FadeOutStop:
+            audioEngine_->fadeOutAndStop(4.0);
+            break;
+        case ControlAction::RepeatSection:
+            if (audioEngine_->isStructuredTimelineMode()) {
+                audioEngine_->toggleRepeatCurrentSection();
+            } else {
+                audioEngine_->toggleClickLoop();
+            }
+            break;
+        case ControlAction::SkipBackSection:
+            audioEngine_->skipSection(-1);
+            break;
+        case ControlAction::SkipForwardSection:
+            audioEngine_->skipSection(1);
+            break;
+        case ControlAction::PreviousSong:
+            if (activeView_ == ActiveView::OpenSet && openSetView_) {
+                openSetView_->selectPreviousSong();
+            }
+            break;
+        case ControlAction::NextSong:
+            if (activeView_ == ActiveView::OpenSet && openSetView_) {
+                openSetView_->selectNextSong();
+            }
+            break;
+        case ControlAction::Count:
+        default:
+            break;
+    }
+}
+
+bool MainComponent::keyPressed(const juce::KeyPress& key, juce::Component*) {
+    if (!controlSurface_) {
+        return false;
+    }
+
+    // Key Learn mode: capture ANY key (including Esc) to assign; user clicks Cancel button to abort
+    if (auto learningKey = controlSurface_->getLearningKeyAction(); learningKey.has_value()) {
+        if (auto kb = KeyBinding::fromKeyPress(key); kb.has_value()) {
+            controlSurface_->setKeyBinding(*learningKey, *kb);
+            if (settingsView_) settingsView_->refreshSettings();
+            return true;
+        }
+        return false;
+    }
+
+    if (controlSurface_->getLearningAction().has_value()) {
+        return false;
+    }
+
+    if (!controlSurface_->isKeyboardShortcutsEnabled()) {
+        return false;
+    }
+    if (juce::ModalComponentManager::getInstance()->getNumModalComponents() > 0) {
+        return false;
+    }
+    if (auto* focused = juce::Component::getCurrentlyFocusedComponent()) {
+        if (dynamic_cast<juce::TextEditor*>(focused) != nullptr) {
+            return false;
+        }
+    }
+
+    const bool allowSongNav = (activeView_ == ActiveView::OpenSet);
+    if (auto matched = controlSurface_->matchKeyPress(key, allowSongNav); matched.has_value()) {
+        executeControlAction(*matched);
+        return true;
+    }
+    return false;
+}
 
 void MainComponent::updateNavButtonStyles() {
     if (navLibraryButton_) navLibraryButton_->setActive(activeView_ == ActiveView::Library);

@@ -6,6 +6,7 @@
 #include "../Audio/PitchShiftUtils.h"
 #include "../Audio/SectionJumpUtils.h"
 #include "../Models/AvailableSections.h"
+#include "../Models/MidiBinding.h"
 #include "../Database/DatabaseService.h"
 #include "../Services/AudioAttachmentService.h"
 #include "../Services/LibraryBackupService.h"
@@ -1186,6 +1187,104 @@ void testStreamingAudioTrack() {
     fs::remove_all(tmpDir, ec);
 }
 
+void testDirectSectionJumpLogic() {
+    std::cout << "[Test] Direct Section Jump (Pre-Play & Live Queue/Repeat/Cancel)..." << std::endl;
+    auto require = [](bool cond, const char* msg) {
+        if (!cond) {
+            throw std::runtime_error(std::string("DirectSectionJump test failed: ") + msg);
+        }
+    };
+
+    std::vector<tracks::SongSection> secs = {
+        { std::nullopt, "Count", 1, 0 },
+        { std::nullopt, "Intro", 4, 1 },
+        { std::nullopt, "Verse 1", 8, 2 },
+        { std::nullopt, "Chorus 1", 8, 3 },
+        { std::nullopt, "Bridge", 8, 4 }
+    };
+    auto spans = tracks::buildSectionSpans(secs, true);
+    require(spans.size() == 5, "5 spans built");
+
+    // Pre-play direct selection (baseIdx = 1 = Intro)
+    require(tracks::computeDirectStartSection(spans, -1, 0) == -1, "clicking leading Count stays normal start");
+    require(tracks::computeDirectStartSection(spans, -1, 1) == -1, "clicking default Intro stays normal start");
+    require(tracks::computeDirectStartSection(spans, -1, 3) == 3, "clicking Chorus 1 selects Chorus 1");
+    require(tracks::computeDirectStartSection(spans, 3, 4) == 4, "clicking Bridge switches selection to Bridge");
+    require(tracks::computeDirectStartSection(spans, 4, 4) == -1, "clicking already-selected Bridge toggles off");
+
+    // Live playback direct queueing while inside Intro (bars 1..4 -> ctx: current=1, naturalNext=2)
+    auto ctxIntro = tracks::computeSectionContext(spans, 2);
+    require(ctxIntro.currentSectionIndex == 1 && ctxIntro.naturalNextIndex == 2, "context inside Intro");
+    require(tracks::computeDirectQueuedSection(5, ctxIntro, -1, 4) == 4, "clicking Bridge queues Bridge");
+    require(tracks::computeDirectQueuedSection(5, ctxIntro, 4, 4) == -1, "clicking already-queued Bridge cancels");
+    require(tracks::computeDirectQueuedSection(5, ctxIntro, 4, 2) == -1, "clicking natural next (Verse 1) cancels override");
+    require(tracks::computeDirectQueuedSection(5, ctxIntro, -1, 1) == 1, "clicking current section (Intro) queues repeat");
+    require(tracks::computeDirectQueuedSection(5, ctxIntro, 1, 1) == -1, "clicking current section again cancels repeat");
+}
+
+void testMidiBindingSerializationAndMatching() {
+    std::cout << "[Test] MIDI Binding Parsing, Serialization & Trigger Matching..." << std::endl;
+    auto require = [](bool cond, const char* msg) {
+        if (!cond) {
+            throw std::runtime_error(std::string("MidiBinding test failed: ") + msg);
+        }
+    };
+
+    // Control Change round-trip & momentary press/release handling (val >= 64 triggers, val < 64 ignored)
+    tracks::MidiBinding ccBind{ tracks::MidiBindingType::ControlChange, 1, 64 };
+    require(ccBind.serialize() == "cc:1:64", "cc serialize");
+    auto ccParsed = tracks::MidiBinding::deserialize("cc:1:64");
+    require(ccParsed.has_value() && *ccParsed == ccBind, "cc deserialize");
+    require(ccBind.toDisplayString() == "Ch 1 CC 64", "cc display");
+    require(ccBind.matches(juce::MidiMessage::controllerEvent(1, 64, 127)), "CC 127 matches");
+    require(ccBind.matches(juce::MidiMessage::controllerEvent(1, 64, 64)), "CC 64 matches");
+    require(!ccBind.matches(juce::MidiMessage::controllerEvent(1, 64, 0)), "CC release 0 ignored");
+    require(!ccBind.matches(juce::MidiMessage::controllerEvent(2, 64, 127)), "wrong channel ignored");
+
+    // Note On round-trip & velocity-0 / Note Off ignore
+    tracks::MidiBinding noteBind{ tracks::MidiBindingType::NoteOn, 0, 60 }; // Any channel, C4
+    require(noteBind.serialize() == "note:0:60", "note serialize");
+    auto noteParsed = tracks::MidiBinding::deserialize("note:0:60");
+    require(noteParsed.has_value() && *noteParsed == noteBind, "note deserialize");
+    require(noteBind.toDisplayString() == "Any Note C4 (60)", "note display");
+    require(noteBind.matches(juce::MidiMessage::noteOn(3, 60, static_cast<juce::uint8>(100))), "note on matches any ch");
+    require(!noteBind.matches(juce::MidiMessage::noteOn(3, 60, static_cast<juce::uint8>(0))), "note on vel 0 ignored");
+    require(!noteBind.matches(juce::MidiMessage::noteOff(3, 60)), "note off ignored");
+
+    // Program Change round-trip
+    tracks::MidiBinding pcBind{ tracks::MidiBindingType::ProgramChange, 16, 12 };
+    require(pcBind.serialize() == "pc:16:12", "pc serialize");
+    auto pcParsed = tracks::MidiBinding::deserialize("pc:16:12");
+    require(pcParsed.has_value() && *pcParsed == pcBind, "pc deserialize");
+    require(pcBind.matches(juce::MidiMessage::programChange(16, 12)), "pc matches");
+    require(!pcBind.matches(juce::MidiMessage::programChange(16, 13)), "pc mismatch");
+
+    // Invalid inputs deserialize cleanly to nullopt
+    require(!tracks::MidiBinding::deserialize("").has_value(), "empty invalid");
+    require(!tracks::MidiBinding::deserialize("bad:1:2").has_value(), "unknown type invalid");
+    require(!tracks::MidiBinding::deserialize("cc:99:1").has_value(), "out-of-range channel invalid");
+
+    // Keyboard shortcut serialization, Esc binding, case-insensitive letters & modifier matching
+    auto escBind = tracks::KeyBinding::defaultForAction(tracks::ControlAction::Stop);
+    require(escBind.toDisplayString() == "Esc", "default Stop is Esc");
+    auto escRoundTrip = tracks::KeyBinding::deserialize(escBind.serialize());
+    require(escRoundTrip.has_value() && *escRoundTrip == escBind, "Esc round-trip");
+    require(escBind.matches(juce::KeyPress(juce::KeyPress::escapeKey)), "Esc matches");
+
+    auto fadeBind = tracks::KeyBinding::defaultForAction(tracks::ControlAction::FadeOutStop);
+    require(fadeBind.toDisplayString() == "F", "default FadeOut is F");
+    require(fadeBind.matches(juce::KeyPress('f')), "lowercase f matches F");
+    require(!fadeBind.matches(juce::KeyPress('f', juce::ModifierKeys::commandModifier, 0)), "Cmd+F does not match plain F");
+
+    tracks::KeyBinding shiftUp{ juce::KeyPress::upKey, tracks::KeyBinding::kModShift };
+    require(shiftUp.toDisplayString() == "Shift+Up", "Shift+Up display");
+    auto shiftUpRt = tracks::KeyBinding::deserialize(shiftUp.serialize());
+    require(shiftUpRt.has_value() && *shiftUpRt == shiftUp, "Shift+Up round-trip");
+    require(shiftUp.matches(juce::KeyPress(juce::KeyPress::upKey, juce::ModifierKeys::shiftModifier, 0)), "Shift+Up matches");
+    require(!shiftUp.matches(juce::KeyPress(juce::KeyPress::upKey)), "plain Up does not match Shift+Up");
+    require(!tracks::KeyBinding::deserialize("none").has_value(), "cleared shortcut deserializes to nullopt");
+}
+
 int main() {
     try {
         testMetronomeCalculations();
@@ -1196,6 +1295,8 @@ int main() {
         testLibraryBackupAndImportRoundTrip();
         testTempoMapAndMidiImport();
         testStreamingAudioTrack();
+        testDirectSectionJumpLogic();
+        testMidiBindingSerializationAndMatching();
         std::cout << "[Test] All AudioEngine tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {

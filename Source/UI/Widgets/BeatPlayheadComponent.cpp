@@ -24,7 +24,68 @@ void BeatPlayheadComponent::setTimelineLayout(std::vector<double> barPositions, 
 
 void BeatPlayheadComponent::setSections(std::vector<SongSection> sections) {
     sections_ = std::move(sections);
+    sectionHitRects_.clear();
+    hoveredSectionIndex_ = -1;
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+    setTooltip("");
     repaint();
+}
+
+int BeatPlayheadComponent::findSectionAtPosition(juce::Point<float> pos) const {
+    for (const auto& hr : sectionHitRects_) {
+        if (hr.bounds.contains(pos)) {
+            return hr.sectionIndex;
+        }
+    }
+    return -1;
+}
+
+void BeatPlayheadComponent::updateHoverTooltip() {
+    if (hoveredSectionIndex_ < 0 || hoveredSectionIndex_ >= static_cast<int>(sections_.size())) {
+        setTooltip("");
+        return;
+    }
+    const juce::String secName(sections_[static_cast<size_t>(hoveredSectionIndex_)].name);
+    if (isPlaying_) {
+        if (hoveredSectionIndex_ == queuedSectionIndex_) {
+            setTooltip("Click to cancel queued jump to " + secName);
+        } else {
+            setTooltip("Click to queue jump to " + secName);
+        }
+    } else {
+        if (hoveredSectionIndex_ == selectedStartSectionIndex_) {
+            setTooltip("Click to clear start section (" + secName + ")");
+        } else {
+            setTooltip("Click to start at " + secName);
+        }
+    }
+}
+
+void BeatPlayheadComponent::mouseMove(const juce::MouseEvent& e) {
+    const int hit = findSectionAtPosition(e.position);
+    if (hit != hoveredSectionIndex_) {
+        hoveredSectionIndex_ = hit;
+        setMouseCursor(hit >= 0 ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
+        updateHoverTooltip();
+        repaint();
+    }
+}
+
+void BeatPlayheadComponent::mouseExit(const juce::MouseEvent&) {
+    if (hoveredSectionIndex_ != -1) {
+        hoveredSectionIndex_ = -1;
+        setMouseCursor(juce::MouseCursor::NormalCursor);
+        setTooltip("");
+        repaint();
+    }
+}
+
+void BeatPlayheadComponent::mouseDown(const juce::MouseEvent& e) {
+    if (e.mods.isPopupMenu()) return;
+    const int hit = findSectionAtPosition(e.position);
+    if (hit >= 0 && onSectionClicked) {
+        onSectionClicked(hit);
+    }
 }
 
 void BeatPlayheadComponent::rebuildWaveformCache(int logicalW,
@@ -99,7 +160,8 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
                                            int queuedSectionIndex,
                                            int selectedStartSectionIndex,
                                            bool isSectionStartCountIn,
-                                           bool clickLoopEnabled) {
+                                           bool clickLoopEnabled,
+                                           bool isFadingOut) {
     const double clampedBars = std::max(0.0, totalBarsElapsed);
     const int clampedBeatsPerBar = std::max(1, beatsPerBar);
     const double clampedDurBars = std::max(0.0, trackDurationBars);
@@ -123,6 +185,7 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
         selectedStartSectionIndex != selectedStartSectionIndex_ ||
         isSectionStartCountIn != isSectionStartCountIn_ ||
         clickLoopEnabled != clickLoopEnabled_ ||
+        isFadingOut != isFadingOut_ ||
         std::abs(clampedDurBars - trackDurationBars_) > 1e-4 ||
         clampedBarCount != trackBarCount_;
 
@@ -142,12 +205,17 @@ void BeatPlayheadComponent::updatePlayhead(double totalBarsElapsed,
     selectedStartSectionIndex_ = selectedStartSectionIndex;
     isSectionStartCountIn_ = isSectionStartCountIn;
     clickLoopEnabled_ = clickLoopEnabled;
+    isFadingOut_ = isFadingOut;
     trackDurationBars_ = clampedDurBars;
     trackBarCount_ = clampedBarCount;
+    if (hoveredSectionIndex_ >= 0) {
+        updateHoverTooltip();
+    }
     repaint();
 }
 
 void BeatPlayheadComponent::paint(juce::Graphics& g) {
+    sectionHitRects_.clear();
     auto bounds = getLocalBounds().toFloat();
 
     // Background container
@@ -236,7 +304,10 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
     juce::String statusText;
     juce::Colour statusCol = AppTheme::textMuted;
     if (isPlaying_) {
-        if (inSectionStartCount) {
+        if (isFadingOut_) {
+            statusText = "FADING OUT...";
+            statusCol = AppTheme::warningAmber;
+        } else if (inSectionStartCount) {
             const auto& targetSec = sections_[static_cast<size_t>(selectedStartSectionIndex_)];
             statusText = (isPaused_ ? "PAUSED - COUNT-IN: " : "COUNT-IN - ") +
                          juce::String(targetSec.name).toUpperCase();
@@ -450,6 +521,9 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 const bool isCount = sec.isCountSection();
                 const bool isActiveSec = !inSectionStartCount && (static_cast<int>(i) == activeSectionIdx);
                 const bool isQueuedSec = (static_cast<int>(i) == highlightedTargetSecIdx);
+                const bool isHoveredSec = (static_cast<int>(i) == hoveredSectionIndex_);
+
+                sectionHitRects_.push_back({ static_cast<int>(i), juce::Rectangle<float>(secX, trackY, secW, trackH) });
 
                 juce::Colour bgTint;
                 if (isCount) {
@@ -464,6 +538,10 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 }
                 g.setColour(bgTint);
                 g.fillRect(secX, trackY, secW, trackH);
+                if (isHoveredSec) {
+                    g.setColour(juce::Colours::white.withAlpha(0.07f));
+                    g.fillRect(secX, trackY, secW, trackH);
+                }
 
                 if (sectionHeaderH > 0.0f) {
                     juce::Colour hdrBg = isQueuedSec
@@ -472,6 +550,9 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                                                     ? AppTheme::warningAmber.withAlpha(isActiveSec ? 0.35f : 0.18f)
                                                     : (isActiveSec ? AppTheme::accentGreen.withAlpha(0.28f)
                                                                    : AppTheme::bgPanel.brighter(i % 2 == 0 ? 0.08f : 0.02f)));
+                    if (isHoveredSec && !isQueuedSec) {
+                        hdrBg = hdrBg.brighter(0.16f);
+                    }
                     g.setColour(hdrBg);
                     g.fillRect(secX, trackY, secW, sectionHeaderH);
                 }
@@ -595,6 +676,9 @@ void BeatPlayheadComponent::paint(juce::Graphics& g) {
                 if (isQueuedSec) {
                     g.setColour(queuedAccent.withAlpha(0.95f));
                     g.drawRect(secX + 0.5f, trackY + 0.5f, std::max(1.0f, secW - 1.0f), trackH - 1.0f, 2.0f);
+                } else if (static_cast<int>(i) == hoveredSectionIndex_) {
+                    g.setColour(queuedAccent.withAlpha(0.55f));
+                    g.drawRect(secX + 0.5f, trackY + 0.5f, std::max(1.0f, secW - 1.0f), trackH - 1.0f, 1.25f);
                 }
 
                 if (sectionHeaderH > 0.0f && secW >= 16.0f) {

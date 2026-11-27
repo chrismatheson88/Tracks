@@ -83,6 +83,7 @@ private:
     std::unique_ptr<TransportIconButton> skipBackButton_;
     std::unique_ptr<TransportIconButton> playPauseButton_;
     std::unique_ptr<TransportIconButton> stopButton_;
+    std::unique_ptr<TransportIconButton> fadeOutButton_;
     std::unique_ptr<TransportIconButton> repeatSectionButton_;
     std::unique_ptr<TransportIconButton> skipForwardButton_;
     std::unique_ptr<TransportIconButton> nextSongButton_;

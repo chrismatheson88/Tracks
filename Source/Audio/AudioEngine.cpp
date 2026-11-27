@@ -3,8 +3,10 @@
 #include <BinaryData.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <set>
 #include <unordered_set>
@@ -36,6 +38,7 @@ AudioEngine::AudioEngine() {
     loadEmbeddedAssets();
     loaderThread_ = std::thread([this]() { loaderLoop(); });
     streamerThread_ = std::thread([this]() { streamerLoop(); });
+    ttsThread_ = std::thread([this]() { ttsWorkerLoop(); });
 }
 
 AudioEngine::~AudioEngine() {
@@ -52,11 +55,20 @@ AudioEngine::~AudioEngine() {
         activeStreamTracks_.clear();
     }
     streamerCv_.notify_all();
+    {
+        std::lock_guard<std::mutex> tLock(ttsMutex_);
+        ttsShuttingDown_ = true;
+        pendingTtsJob_.reset();
+    }
+    ttsCv_.notify_all();
     if (loaderThread_.joinable()) {
         loaderThread_.join();
     }
     if (streamerThread_.joinable()) {
         streamerThread_.join();
+    }
+    if (ttsThread_.joinable()) {
+        ttsThread_.join();
     }
     deviceManager_.removeAudioCallback(this);
 }
@@ -68,6 +80,25 @@ void AudioEngine::setTransitionConfig(SongTransitionMode mode, int crossfadeBars
 }
 
 void AudioEngine::handleAsyncUpdate() {
+    if (pendingFadeStopCleanup_.exchange(false, std::memory_order_acq_rel)) {
+        bool keepStartPrefetch = false;
+        {
+            std::lock_guard<std::mutex> lock(audioMutex_);
+            if (!isPlaying_.load()) {
+                for (auto& t : loadedTracks_) {
+                    if (t.stream) t.stream->trimToIntroOnly();
+                }
+                if (selectedStartSectionIndex_ >= 0) {
+                    updateSectionPrefetchLocked(selectedStartSectionIndex_);
+                    keepStartPrefetch = true;
+                }
+                syncActiveStreamsLocked(false);
+            }
+        }
+        if (!isPlaying_.load()) {
+            notifyStreamer(!keepStartPrefetch);
+        }
+    }
     const int raw = pendingTransitionTrigger_.exchange(0, std::memory_order_acq_rel);
     if (raw != 0 && onSongTransitionTriggered) {
         onSongTransitionTriggered(static_cast<TransitionTrigger>(raw));
@@ -1070,8 +1101,11 @@ void AudioEngine::clearAllCachedAudio() {
 
 void AudioEngine::loadSong(const Song& song) {
     const bool keepCrossfade = preserveCrossfadeOnNextLoad_.exchange(false, std::memory_order_acq_rel);
+    fadeOutActive_.store(false, std::memory_order_relaxed);
     if (!keepCrossfade) {
         std::lock_guard<std::mutex> audioLock(audioMutex_);
+        fadeOutElapsedSamples_ = 0;
+        fadeOutTotalSamples_ = 0;
         clearCrossfadeOutLocked();
         awaitingTransitionSwap_ = false;
     }
@@ -1356,6 +1390,46 @@ void AudioEngine::toggleRepeatCurrentSection() {
     }
 }
 
+void AudioEngine::selectOrQueueSection(int sectionIndex) {
+    std::lock_guard<std::mutex> lock(audioMutex_);
+    const int n = static_cast<int>(sectionSpans_.size());
+    if (n == 0 || sectionIndex < 0 || sectionIndex >= n || !isStructuredTimelineMode()) {
+        return;
+    }
+
+    // Before playback starts: directly select or toggle off the starting section
+    if (!isPlaying_.load()) {
+        const int nextStart = computeDirectStartSection(sectionSpans_, selectedStartSectionIndex_, sectionIndex);
+        selectedStartSectionIndex_ = nextStart;
+        selectedStartSectionIndexAtomic_.store(nextStart, std::memory_order_relaxed);
+        updateSectionPrefetchLocked(nextStart);
+        return;
+    }
+
+    // While playing: directly queue jumping to (or repeating) the clicked section at the current section boundary
+    const int currentBar = static_cast<int>(std::floor(std::max(0.0, metronome_.getBarForFrame(metronome_.getMetronomeFrame()))));
+    const SectionContext ctx = computeSectionContext(sectionSpans_, currentBar);
+    const int nextQueued = computeDirectQueuedSection(n, ctx, queuedSectionIndex_, sectionIndex);
+
+    if (nextQueued < 0) {
+        clearQueuedSectionLocked();
+        return;
+    }
+
+    queuedSectionIndex_ = nextQueued;
+    queuedJumpBoundaryBar_ = ctx.boundaryBar;
+    queuedSectionIndexAtomic_.store(nextQueued, std::memory_order_relaxed);
+    updateSectionPrefetchLocked(nextQueued);
+
+    const auto& targetSpan = sectionSpans_[static_cast<size_t>(nextQueued)];
+    const int cueBar = ctx.boundaryBar - 1;
+    if (cueBar >= 0) {
+        metronome_.setQueuedAnnouncementOverride(cueBar, targetSpan.isCount ? "" : targetSpan.normalizedKey);
+    } else {
+        metronome_.clearQueuedAnnouncementOverride();
+    }
+}
+
 std::vector<float> AudioEngine::getWaveformPeaks() {
     std::lock_guard<std::mutex> lock(waveformMutex_);
     return waveformPeaks_;
@@ -1495,8 +1569,12 @@ void AudioEngine::setPitchSemitones(int semitones) {
 }
 
 void AudioEngine::play() {
+    fadeOutActive_.store(false, std::memory_order_relaxed);
+    pendingFadeStopCleanup_.store(false, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(audioMutex_);
+        fadeOutElapsedSamples_ = 0;
+        fadeOutTotalSamples_ = 0;
         metronome_.reset();
         clearQueuedSectionLocked();
         awaitingTransitionSwap_ = false;
@@ -1571,11 +1649,16 @@ void AudioEngine::resume() {
 void AudioEngine::stop() {
     const bool wasPlaying = isPlaying_.exchange(false);
     isPaused_.store(false);
+    fadeOutActive_.store(false, std::memory_order_relaxed);
+    pendingFadeStopCleanup_.store(false, std::memory_order_relaxed);
+    stopGuideAnnouncement();
     pendingTransitionTrigger_.store(0, std::memory_order_relaxed);
     preserveCrossfadeOnNextLoad_.store(false, std::memory_order_relaxed);
     bool keepStartPrefetch = false;
     {
         std::lock_guard<std::mutex> lock(audioMutex_);
+        fadeOutElapsedSamples_ = 0;
+        fadeOutTotalSamples_ = 0;
         metronome_.reset();
         clearQueuedSectionLocked();
         clearCrossfadeOutLocked();
@@ -1611,6 +1694,27 @@ void AudioEngine::stop() {
     }
 }
 
+void AudioEngine::fadeOutAndStop(double durationSeconds) {
+    if (!isPlaying_.load()) {
+        return;
+    }
+    if (isPaused_.load() || fadeOutActive_.load(std::memory_order_relaxed)) {
+        // Clicking Fade-Out while paused or already fading out performs an immediate hard stop
+        stop();
+        return;
+    }
+
+    const double clampedSec = std::clamp(durationSeconds, 0.1, 10.0);
+    {
+        std::lock_guard<std::mutex> lock(audioMutex_);
+        const double sr = (currentSampleRate_ > 0.0) ? currentSampleRate_ : 44100.0;
+        fadeOutElapsedSamples_ = 0;
+        fadeOutTotalSamples_ = std::max<int64_t>(1, static_cast<int64_t>(std::llround(clampedSec * sr)));
+        clearQueuedSectionLocked();
+        fadeOutActive_.store(true, std::memory_order_release);
+    }
+}
+
 void AudioEngine::setMasterGain(float gain) {
     masterGain_.store(std::max(0.0f, std::min(4.0f, gain)));
 }
@@ -1633,7 +1737,225 @@ void AudioEngine::setClickSubdivisions(bool enableEighths, bool enableSixteenths
 }
 
 void AudioEngine::setGuideGain(float gain) {
+    guideGainAtomic_.store(std::clamp(gain, 0.0f, 4.0f), std::memory_order_relaxed);
     metronome_.setGuideGain(gain);
+}
+
+void AudioEngine::stopGuideAnnouncement() {
+    guideAnnouncementGen_.fetch_add(1, std::memory_order_acq_rel);
+    guideAnnouncementActive_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> gLock(guideAnnouncementMutex_);
+        guideAnnouncementPos_ = 0;
+    }
+    {
+        std::lock_guard<std::mutex> tLock(ttsMutex_);
+        pendingTtsJob_.reset();
+    }
+}
+
+void AudioEngine::speakGuideText(const std::string& text) {
+    // Trim whitespace; ignore blank strings
+    auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return;
+    auto last = text.find_last_not_of(" \t\r\n");
+    std::string cleaned = text.substr(first, last - first + 1);
+    if (cleaned.empty()) return;
+
+    const int sr = std::clamp(static_cast<int>(std::llround(currentSampleRate_ > 0.0 ? currentSampleRate_ : 44100.0)),
+                              16000, 192000);
+    const std::string cacheKey = cleaned + "@" + std::to_string(sr);
+    const uint64_t gen = guideAnnouncementGen_.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    std::shared_ptr<const juce::AudioBuffer<float>> cachedBuf;
+    {
+        std::lock_guard<std::mutex> tLock(ttsMutex_);
+        auto it = ttsCache_.find(cacheKey);
+        if (it != ttsCache_.end() && it->second && it->second->getNumSamples() > 0) {
+            cachedBuf = it->second;
+            pendingTtsJob_.reset();
+        } else {
+            pendingTtsJob_ = PendingTtsJob{ gen, cleaned, sr };
+        }
+    }
+
+    if (cachedBuf) {
+        std::lock_guard<std::mutex> gLock(guideAnnouncementMutex_);
+        guideAnnouncementBuffer_ = std::move(cachedBuf);
+        guideAnnouncementPos_ = 0;
+        guideAnnouncementActive_.store(true, std::memory_order_release);
+        return;
+    }
+
+    // Stop any previous announcement immediately while the new one synthesizes
+    guideAnnouncementActive_.store(false, std::memory_order_release);
+    ttsCv_.notify_one();
+}
+
+std::shared_ptr<const juce::AudioBuffer<float>> AudioEngine::synthesizeTtsMonoBuffer(const std::string& text, int sampleRate) {
+#if JUCE_MAC
+    const auto nowNs = std::chrono::steady_clock::now().time_since_epoch().count();
+    auto tmpDir = fs::path(juce::File::getSpecialLocation(juce::File::tempDirectory).getFullPathName().toStdString());
+    const fs::path txtPath = tmpDir / ("tracks_tts_" + std::to_string(nowNs) + ".txt");
+    const fs::path wavPath = tmpDir / ("tracks_tts_" + std::to_string(nowNs) + ".wav");
+
+    auto cleanup = [&]() {
+        std::error_code ec;
+        fs::remove(txtPath, ec);
+        fs::remove(wavPath, ec);
+    };
+
+    {
+        std::ofstream ofs(txtPath, std::ios::binary);
+        if (!ofs) return nullptr;
+        ofs << text;
+    }
+
+    juce::ChildProcess proc;
+    juce::StringArray args;
+    args.add("/usr/bin/say");
+    args.add("-f");
+    args.add(txtPath.string());
+    args.add("-o");
+    args.add(wavPath.string());
+    args.add("--file-format=WAVE");
+    args.add("--data-format=LEI16@" + juce::String(sampleRate));
+
+    if (!proc.start(args)) {
+        cleanup();
+        return nullptr;
+    }
+    if (!proc.waitForProcessToFinish(4000)) {
+        proc.kill();
+        cleanup();
+        return nullptr;
+    }
+
+    juce::File wavFile(wavPath.string());
+    if (!wavFile.existsAsFile() || wavFile.getSize() <= 44) {
+        cleanup();
+        return nullptr;
+    }
+
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(fm.createReaderFor(wavFile));
+    if (!reader || reader->lengthInSamples <= 0 || reader->numChannels == 0) {
+        cleanup();
+        return nullptr;
+    }
+
+    const int rawSamples = static_cast<int>(std::min<int64_t>(reader->lengthInSamples, static_cast<int64_t>(sampleRate) * 15));
+    const int rawCh = static_cast<int>(reader->numChannels);
+    juce::AudioBuffer<float> rawBuf(rawCh, rawSamples);
+    rawBuf.clear();
+    reader->read(&rawBuf, 0, rawSamples, 0, true, rawCh >= 2);
+    reader.reset();
+    cleanup();
+
+    // Downmix to mono if needed
+    juce::AudioBuffer<float> mono(1, rawSamples);
+    if (rawCh >= 2) {
+        const float* L = rawBuf.getReadPointer(0);
+        const float* R = rawBuf.getReadPointer(1);
+        float* dst = mono.getWritePointer(0);
+        for (int i = 0; i < rawSamples; ++i) {
+            dst[i] = 0.5f * (L[i] + R[i]);
+        }
+    } else {
+        mono.copyFrom(0, 0, rawBuf, 0, 0, rawSamples);
+    }
+
+    // Trim leading & trailing silence (< -50 dB) so playback starts crisply
+    const float* m = mono.getReadPointer(0);
+    constexpr float kThresh = 0.003f;
+    int startIdx = 0;
+    while (startIdx < rawSamples && std::abs(m[startIdx]) < kThresh) ++startIdx;
+    int endIdx = rawSamples - 1;
+    while (endIdx > startIdx && std::abs(m[endIdx]) < kThresh) --endIdx;
+    if (startIdx >= endIdx) {
+        return nullptr;
+    }
+
+    const int pad = std::min(256, sampleRate / 100);
+    startIdx = std::max(0, startIdx - pad);
+    endIdx = std::min(rawSamples - 1, endIdx + pad);
+    const int trimmedLen = endIdx - startIdx + 1;
+
+    auto out = std::make_shared<juce::AudioBuffer<float>>(1, trimmedLen);
+    out->copyFrom(0, 0, mono, 0, startIdx, trimmedLen);
+
+    // Normalize peak to 0.82 so TTS matches the guide voice pack level cleanly
+    float peak = 0.0f;
+    float* dst = out->getWritePointer(0);
+    for (int i = 0; i < trimmedLen; ++i) {
+        peak = std::max(peak, std::abs(dst[i]));
+    }
+    if (peak > 1e-4f) {
+        const float norm = std::min(4.0f, 0.82f / peak);
+        juce::FloatVectorOperations::multiply(dst, norm, trimmedLen);
+    }
+
+    // Tiny fade-in/out to prevent clicks
+    const int fadeLen = std::min(128, trimmedLen / 4);
+    for (int i = 0; i < fadeLen; ++i) {
+        const float g = static_cast<float>(i) / static_cast<float>(fadeLen);
+        dst[i] *= g;
+        dst[trimmedLen - 1 - i] *= g;
+    }
+    return out;
+#else
+    (void)text;
+    (void)sampleRate;
+    return nullptr;
+#endif
+}
+
+void AudioEngine::ttsWorkerLoop() {
+    constexpr size_t kMaxCachedTtsItems = 64;
+    while (true) {
+        PendingTtsJob job;
+        {
+            std::unique_lock<std::mutex> lock(ttsMutex_);
+            ttsCv_.wait(lock, [this]() { return ttsShuttingDown_ || pendingTtsJob_.has_value(); });
+            if (ttsShuttingDown_) break;
+            job = std::move(*pendingTtsJob_);
+            pendingTtsJob_.reset();
+        }
+
+        // Skip stale jobs superseded before synthesis even started
+        if (job.generation != guideAnnouncementGen_.load(std::memory_order_acquire)) {
+            continue;
+        }
+
+        auto buf = synthesizeTtsMonoBuffer(job.text, job.sampleRate);
+        if (!buf || buf->getNumSamples() <= 0) {
+            continue;
+        }
+
+        const std::string cacheKey = job.text + "@" + std::to_string(job.sampleRate);
+        {
+            std::lock_guard<std::mutex> lock(ttsMutex_);
+            if (ttsShuttingDown_) break;
+            if (ttsCache_.find(cacheKey) == ttsCache_.end()) {
+                ttsCacheOrder_.push_back(cacheKey);
+                while (ttsCacheOrder_.size() > kMaxCachedTtsItems) {
+                    ttsCache_.erase(ttsCacheOrder_.front());
+                    ttsCacheOrder_.pop_front();
+                }
+            }
+            ttsCache_[cacheKey] = buf;
+        }
+
+        if (job.generation == guideAnnouncementGen_.load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> gLock(guideAnnouncementMutex_);
+            if (job.generation == guideAnnouncementGen_.load(std::memory_order_acquire)) {
+                guideAnnouncementBuffer_ = std::move(buf);
+                guideAnnouncementPos_ = 0;
+                guideAnnouncementActive_.store(true, std::memory_order_release);
+            }
+        }
+    }
 }
 
 void AudioEngine::setClickChannel(int channel) {
@@ -2362,13 +2684,39 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
     }
 
     if (!isPlaying_.load() || isPaused_.load()) {
+        float guidePeak = 0.0f;
+        const int guideCh = std::clamp(metronome_.getGuideChannel(), 0, std::max(0, numOutputChannels - 1));
+        if (guideAnnouncementActive_.load(std::memory_order_acquire)) {
+            std::unique_lock<std::mutex> gLock(guideAnnouncementMutex_, std::try_to_lock);
+            if (gLock.owns_lock() && guideAnnouncementBuffer_ && guideAnnouncementBuffer_->getNumSamples() > 0) {
+                const int total = guideAnnouncementBuffer_->getNumSamples();
+                const int remaining = std::max(0, total - guideAnnouncementPos_);
+                const int toCopy = std::min(numSamples, remaining);
+                if (toCopy > 0 && guideCh < numOutputChannels && outputChannelData[guideCh]) {
+                    const float gGain = guideGainAtomic_.load(std::memory_order_relaxed) * masterGain_.load();
+                    const float* src = guideAnnouncementBuffer_->getReadPointer(0) + guideAnnouncementPos_;
+                    float* dst = outputChannelData[guideCh];
+                    juce::FloatVectorOperations::copyWithMultiply(dst, src, gGain, toCopy);
+                    juce::FloatVectorOperations::clip(dst, dst, -0.95f, 0.95f, toCopy);
+                    auto range = juce::FloatVectorOperations::findMinAndMax(dst, toCopy);
+                    guidePeak = std::max(std::abs(range.getStart()), std::abs(range.getEnd()));
+                }
+                guideAnnouncementPos_ += toCopy;
+                if (guideAnnouncementPos_ >= total) {
+                    guideAnnouncementActive_.store(false, std::memory_order_release);
+                }
+            }
+        }
+
         const int n = std::clamp(activePeakChannels_.load(std::memory_order_relaxed), 1, kMaxMeterChannels);
         for (int ch = 0; ch < n; ++ch) {
             const float prev = outputPeaksAtomic_[static_cast<size_t>(ch)].load(std::memory_order_relaxed);
-            if (prev > 1e-4f) {
-                outputPeaksAtomic_[static_cast<size_t>(ch)].store(prev * 0.82f, std::memory_order_relaxed);
-            } else if (prev != 0.0f) {
-                outputPeaksAtomic_[static_cast<size_t>(ch)].store(0.0f, std::memory_order_relaxed);
+            float next = (prev > 1e-4f) ? (prev * 0.82f) : 0.0f;
+            if (ch == guideCh && guidePeak > next) {
+                next = guidePeak;
+            }
+            if (next != prev) {
+                outputPeaksAtomic_[static_cast<size_t>(ch)].store(next, std::memory_order_relaxed);
             }
         }
         return;
@@ -2386,7 +2734,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
     const bool structuredTimeline = isStructuredTimelineMode();
     const SongTransitionMode transitionMode = clampTransitionMode(transitionModeAtomic_.load(std::memory_order_relaxed));
     const int transitionCrossfadeBars = clampCrossfadeBars(transitionCrossfadeBarsAtomic_.load(std::memory_order_relaxed));
-    const bool hasNextSong = hasNextSongAtomic_.load(std::memory_order_relaxed);
+    const bool hasNextSong = hasNextSongAtomic_.load(std::memory_order_relaxed) &&
+                             !fadeOutActive_.load(std::memory_order_relaxed);
 
     {
         std::unique_lock<std::mutex> lock(audioMutex_, std::try_to_lock);
@@ -2606,6 +2955,74 @@ void AudioEngine::audioDeviceIOCallbackWithContext(const float* const*,
             // Mix any active outgoing crossfade tail smoothly underneath the incoming song
             if (crossfadeOut_.active && crossfadeRenderStart < numSamples) {
                 renderCrossfadeOutLocked(crossfadeRenderStart, numSamples - crossfadeRenderStart, numOutputChannels);
+            }
+
+            // Mix any active one-shot Guide TTS song announcement onto the Guide channel
+            if (guideAnnouncementActive_.load(std::memory_order_acquire)) {
+                std::unique_lock<std::mutex> gLock(guideAnnouncementMutex_, std::try_to_lock);
+                if (gLock.owns_lock() && guideAnnouncementBuffer_ && guideAnnouncementBuffer_->getNumSamples() > 0) {
+                    const int total = guideAnnouncementBuffer_->getNumSamples();
+                    const int remaining = std::max(0, total - guideAnnouncementPos_);
+                    const int toCopy = std::min(numSamples, remaining);
+                    const int guideCh = std::clamp(metronome_.getGuideChannel(), 0, std::max(0, numOutputChannels - 1));
+                    if (toCopy > 0 && guideCh < renderScratchBuffer_.getNumChannels()) {
+                        const float gGain = guideGainAtomic_.load(std::memory_order_relaxed);
+                        const float* src = guideAnnouncementBuffer_->getReadPointer(0) + guideAnnouncementPos_;
+                        float* dst = renderScratchBuffer_.getWritePointer(guideCh);
+                        juce::FloatVectorOperations::addWithMultiply(dst, src, gGain, toCopy);
+                    }
+                    guideAnnouncementPos_ += toCopy;
+                    if (guideAnnouncementPos_ >= total) {
+                        guideAnnouncementActive_.store(false, std::memory_order_release);
+                    }
+                }
+            }
+
+            // Apply smooth raised-cosine fade-out envelope when Fade-Out Stop is active
+            if (fadeOutActive_.load(std::memory_order_relaxed) && fadeOutTotalSamples_ > 0) {
+                const double invTotal = 1.0 / static_cast<double>(fadeOutTotalSamples_);
+                constexpr double kPi = 3.14159265358979323846;
+                const int64_t remaining = std::max<int64_t>(0, fadeOutTotalSamples_ - fadeOutElapsedSamples_);
+                const int fadeCount = static_cast<int>(std::min<int64_t>(numSamples, remaining));
+
+                for (int ch = 0; ch < numOutputChannels; ++ch) {
+                    float* buf = renderScratchBuffer_.getWritePointer(ch);
+                    for (int i = 0; i < fadeCount; ++i) {
+                        const double p = std::clamp(static_cast<double>(fadeOutElapsedSamples_ + i) * invTotal, 0.0, 1.0);
+                        const float env = static_cast<float>(0.5 * (1.0 + std::cos(kPi * p)));
+                        buf[i] *= env;
+                    }
+                    if (fadeCount < numSamples) {
+                        juce::FloatVectorOperations::clear(buf + fadeCount, numSamples - fadeCount);
+                    }
+                }
+
+                fadeOutElapsedSamples_ += fadeCount;
+                if (fadeOutElapsedSamples_ >= fadeOutTotalSamples_) {
+                    fadeOutActive_.store(false, std::memory_order_relaxed);
+                    fadeOutElapsedSamples_ = 0;
+                    fadeOutTotalSamples_ = 0;
+                    isPlaying_.store(false);
+                    isPaused_.store(false);
+                    metronome_.reset();
+                    clearQueuedSectionLocked();
+                    clearCrossfadeOutLocked();
+                    awaitingTransitionSwap_ = false;
+                    clickLoopStopBar_ = -1;
+                    clickLoopEnabled_.store(true, std::memory_order_relaxed);
+                    trackMuteUntilFrame_ = 0;
+                    isSectionStartCountInAtomic_.store(false, std::memory_order_relaxed);
+                    trackJumpFadeSamplesRemaining_ = 0;
+                    for (auto& t : loadedTracks_) {
+                        t.position = 0;
+                    }
+                    for (auto& bus : stretchBuses_) {
+                        bus.primed = false;
+                        bus.inputPos = 0;
+                    }
+                    pendingFadeStopCleanup_.store(true, std::memory_order_release);
+                    shouldTriggerAsync = true;
+                }
             }
 
             if (shouldTriggerAsync) {

@@ -190,11 +190,12 @@ private:
 
 class TransportComponent::TransportIconButton : public juce::Button {
 public:
-    enum class IconType { Previous, SkipBack, Play, Pause, Stop, Repeat, SkipForward, Next };
+    enum class IconType { Previous, SkipBack, Play, Pause, Stop, FadeOut, Repeat, SkipForward, Next };
 
     TransportIconButton(const juce::String& name, IconType type, juce::Colour baseColour)
         : juce::Button(name), iconType_(type), baseColour_(baseColour) {
         setTooltip(name);
+        setWantsKeyboardFocus(false);
     }
 
     void setIconType(IconType type) {
@@ -270,6 +271,24 @@ public:
             case IconType::Stop: {
                 const float sq = iconH * 0.88f;
                 g.fillRoundedRectangle(cx - sq * 0.5f, cy - sq * 0.5f, sq, sq, 2.0f);
+                break;
+            }
+            case IconType::FadeOut: {
+                // Descending 4-bar fade-out ramp icon (tall left -> short right)
+                const float totalW = iconH * 1.15f;
+                const float gap = 2.0f;
+                const float barW = (totalW - gap * 3.0f) * 0.25f;
+                const float startX = cx - totalW * 0.5f;
+                const float bottomY = cy + halfH;
+                const float heights[4] = { iconH, iconH * 0.72f, iconH * 0.45f, iconH * 0.20f };
+                for (int i = 0; i < 4; ++i) {
+                    const float h = std::max(2.0f, heights[i]);
+                    g.fillRoundedRectangle(startX + static_cast<float>(i) * (barW + gap),
+                                           bottomY - h,
+                                           barW,
+                                           h,
+                                           1.0f);
+                }
                 break;
             }
             case IconType::Repeat: {
@@ -537,6 +556,14 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
         if (onStopClicked) onStopClicked();
     };
     addAndMakeVisible(stopButton_.get());
+
+    // Fade-Out Stop button (smooth 4-second raised-cosine fade-out; click again for immediate stop)
+    fadeOutButton_ = std::make_unique<TransportIconButton>("Fade Out & Stop (4s)", TransportIconButton::IconType::FadeOut, AppTheme::bgPanel);
+    fadeOutButton_->setEnabled(false);
+    fadeOutButton_->onClick = [this]() {
+        audioEngine_.fadeOutAndStop(4.0);
+    };
+    addAndMakeVisible(fadeOutButton_.get());
 
     // Repeat current section button (with tracks) / Click Loop toggle (without tracks)
     repeatSectionButton_ = std::make_unique<TransportIconButton>("Repeat / Loop", TransportIconButton::IconType::Repeat, AppTheme::bgPanel);
@@ -819,6 +846,9 @@ TransportComponent::TransportComponent(AudioEngine& audioEngine)
     trackStripsViewport_.setViewedComponent(trackStripsContainer_.get(), false);
     addChildComponent(trackStripsViewport_);
 
+    beatPlayhead_.onSectionClicked = [this](int sectionIdx) {
+        audioEngine_.selectOrQueueSection(sectionIdx);
+    };
     addAndMakeVisible(beatPlayhead_);
     addAndMakeVisible(outputMeter_);
 
@@ -1534,6 +1564,13 @@ void TransportComponent::timerCallback() {
                          playing ? "Skip Forward to Next Section" : "Select Later Start Section");
 
     const bool clickLoopOn = audioEngine_.isClickLoopEnabled();
+    const bool fadingOut = audioEngine_.isFadingOut();
+    if (fadeOutButton_) {
+        fadeOutButton_->setActiveHighlight(fadingOut);
+        fadeOutButton_->setBaseColour(fadingOut ? AppTheme::warningAmber.darker(0.25f) : AppTheme::bgPanel);
+        setBtnStateIfChanged(fadeOutButton_.get(), (playing && !paused) || fadingOut,
+                             fadingOut ? "Fading Out... Click Again to Stop Immediately" : "Fade Out & Stop (4s)");
+    }
     if (repeatSectionButton_) {
         if (showWaveform) {
             repeatSectionButton_->setActiveHighlight(repeatActive);
@@ -1571,7 +1608,8 @@ void TransportComponent::timerCallback() {
                                 queuedSec,
                                 selectedStartSec,
                                 inSectionStartCountIn,
-                                clickLoopOn);
+                                clickLoopOn,
+                                fadingOut);
 
     auto peaks = audioEngine_.getOutputPeaks();
     bool anyPeakActive = false;
@@ -1697,10 +1735,11 @@ void TransportComponent::resized() {
 
         area.removeFromTop(12);
 
-        // Transport controls row: Previous Song | Skip Back | Play/Pause | Stop | Repeat Section | Skip Forward | Next Song   [Transition Dropdown] [Bars]
+        // Transport controls row: Previous Song | Skip Back | Play/Pause | Stop | Fade Out | Repeat Section | Skip Forward | Next Song   [Transition Dropdown] [Bars]
         auto transportRow = area.removeFromTop(36);
         prevSongButton_->setVisible(true);
         skipBackButton_->setVisible(true);
+        fadeOutButton_->setVisible(true);
         repeatSectionButton_->setVisible(true);
         skipForwardButton_->setVisible(true);
         nextSongButton_->setVisible(true);
@@ -1710,10 +1749,10 @@ void TransportComponent::resized() {
         if (crossfadeBarsStepper_) crossfadeBarsStepper_->setVisible(showCrossfadeInput);
         crossfadeBarsLabel_.setVisible(showCrossfadeInput);
 
-        const int btnGap = 8;
-        const int iconBtnW = 46;
-        const int playW = 60;
-        const int totalBtnW = iconBtnW * 6 + playW + btnGap * 6;
+        const int btnGap = 6;
+        const int iconBtnW = 42;
+        const int playW = 56;
+        const int totalBtnW = iconBtnW * 7 + playW + btnGap * 7;
         const int xfInputW = showCrossfadeInput ? (4 + 42 + 4 + 30) : 0; // gap + stepper + gap + "bars"
         const int maxRightBlockW = std::max(140, transportRow.getWidth() - totalBtnW - 12);
         const int dropdownW = showCrossfadeInput
@@ -1746,6 +1785,8 @@ void TransportComponent::resized() {
         playPauseButton_->setBounds(btnGroup.removeFromLeft(playW));
         btnGroup.removeFromLeft(btnGap);
         stopButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
+        btnGroup.removeFromLeft(btnGap);
+        fadeOutButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
         btnGroup.removeFromLeft(btnGap);
         repeatSectionButton_->setBounds(btnGroup.removeFromLeft(iconBtnW));
         btnGroup.removeFromLeft(btnGap);
@@ -1851,6 +1892,7 @@ void TransportComponent::resized() {
     tempoDownButton_.setVisible(false);
     tempoUpButton_.setVisible(false);
     skipBackButton_->setVisible(true);
+    fadeOutButton_->setVisible(true);
     repeatSectionButton_->setVisible(true);
     skipForwardButton_->setVisible(true);
     arrangementBox_.setVisible(true);
@@ -1861,15 +1903,17 @@ void TransportComponent::resized() {
 
     auto area = getLocalBounds().reduced(12, 8);
 
-    // Left controls: Skip Back | Play/Pause | Stop | Repeat Section | Skip Forward icon buttons
-    auto btnArea = area.removeFromLeft(182).withSizeKeepingCentre(182, 38);
-    skipBackButton_->setBounds(btnArea.removeFromLeft(29));
+    // Left controls: Skip Back | Play/Pause | Stop | Fade Out | Repeat Section | Skip Forward icon buttons
+    auto btnArea = area.removeFromLeft(206).withSizeKeepingCentre(206, 38);
+    skipBackButton_->setBounds(btnArea.removeFromLeft(28));
     btnArea.removeFromLeft(4);
-    playPauseButton_->setBounds(btnArea.removeFromLeft(44));
+    playPauseButton_->setBounds(btnArea.removeFromLeft(42));
     btnArea.removeFromLeft(4);
-    stopButton_->setBounds(btnArea.removeFromLeft(34));
+    stopButton_->setBounds(btnArea.removeFromLeft(30));
     btnArea.removeFromLeft(4);
-    repeatSectionButton_->setBounds(btnArea.removeFromLeft(30));
+    fadeOutButton_->setBounds(btnArea.removeFromLeft(30));
+    btnArea.removeFromLeft(4);
+    repeatSectionButton_->setBounds(btnArea.removeFromLeft(28));
     btnArea.removeFromLeft(4);
     skipForwardButton_->setBounds(btnArea);
 

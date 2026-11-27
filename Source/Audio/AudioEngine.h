@@ -61,9 +61,11 @@ public:
     void pause();
     void resume();
     void stop();
+    void fadeOutAndStop(double durationSeconds = 4.0);
 
     bool isPlaying() const { return isPlaying_.load(); }
     bool isPaused() const { return isPaused_.load(); }
+    bool isFadingOut() const { return fadeOutActive_.load(std::memory_order_relaxed); }
     bool isLoadingTracks() const { return isLoadingTracks_.load(std::memory_order_relaxed); }
 
     // Dynamic parameter adjustments
@@ -77,6 +79,10 @@ public:
     void setGuideChannel(int channel);
     int getClickChannel() const { return metronome_.getClickChannel(); }
     int getGuideChannel() const { return metronome_.getGuideChannel(); }
+
+    // One-shot text-to-speech announcement routed directly to the Guide channel
+    void speakGuideText(const std::string& text);
+    void stopGuideAnnouncement();
 
     // Click & guide asset packs (supports WAV, MP3, M4A)
     std::vector<std::string> getAvailableClickPacks() const;
@@ -112,6 +118,7 @@ public:
     // Queued section navigation (executes seamlessly when the current section finishes)
     // Also supports selecting a starting section before playback begins.
     void skipSection(int delta);
+    void selectOrQueueSection(int sectionIndex);
     void toggleRepeatCurrentSection();
     void clearQueuedSection();
     int getQueuedSectionIndex() const { return queuedSectionIndexAtomic_.load(std::memory_order_relaxed); }
@@ -231,6 +238,8 @@ private:
 
     std::atomic<bool> isPlaying_{false};
     std::atomic<bool> isPaused_{false};
+    std::atomic<bool> fadeOutActive_{false};
+    std::atomic<bool> pendingFadeStopCleanup_{false};
     std::atomic<bool> isLoadingTracks_{false};
     std::atomic<bool> useTracks_{true};
     std::atomic<bool> hasTracks_{false};
@@ -248,6 +257,7 @@ private:
     std::atomic<bool> preserveCrossfadeOnNextLoad_{false};
     std::atomic<int64_t> maxSongLengthFramesAtomic_{0};
     std::atomic<float> masterGain_{1.0f};
+    std::atomic<float> guideGainAtomic_{1.0f};
     std::atomic<int> pitchSemitones_{0};
     std::atomic<int> originalTrackTempo_{120};
     std::atomic<double> cachedTrackDurationBars_{0.0};
@@ -263,6 +273,8 @@ private:
     int64_t trackMuteUntilFrame_ = 0;
     int trackJumpFadeSamplesRemaining_ = 0;
     static constexpr int kTrackJumpFadeSamples = 64;
+    int64_t fadeOutElapsedSamples_ = 0;
+    int64_t fadeOutTotalSamples_ = 0;
 
     std::atomic<int> currentOutputChannels_{2};
     double currentSampleRate_ = 44100.0;
@@ -300,6 +312,29 @@ private:
     uint64_t streamerSyncRequest_ = 0;
     uint64_t streamerSyncCompleted_ = 0;
     std::thread streamerThread_;
+
+    // Guide-channel text-to-speech playback & background synthesis worker
+    std::atomic<bool> guideAnnouncementActive_{false};
+    std::atomic<uint64_t> guideAnnouncementGen_{0};
+    std::mutex guideAnnouncementMutex_;
+    std::shared_ptr<const juce::AudioBuffer<float>> guideAnnouncementBuffer_;
+    int guideAnnouncementPos_ = 0;
+
+    struct PendingTtsJob {
+        uint64_t generation = 0;
+        std::string text;
+        int sampleRate = 44100;
+    };
+    std::mutex ttsMutex_;
+    std::condition_variable ttsCv_;
+    bool ttsShuttingDown_ = false;
+    std::optional<PendingTtsJob> pendingTtsJob_;
+    std::unordered_map<std::string, std::shared_ptr<const juce::AudioBuffer<float>>> ttsCache_;
+    std::deque<std::string> ttsCacheOrder_;
+    std::thread ttsThread_;
+
+    void ttsWorkerLoop();
+    static std::shared_ptr<const juce::AudioBuffer<float>> synthesizeTtsMonoBuffer(const std::string& text, int sampleRate);
 
     juce::AudioBuffer<float> renderScratchBuffer_;
     juce::AudioBuffer<float> crossfadeScratchBuffer_;

@@ -173,6 +173,37 @@ inline int computeToggleRepeatCurrentSection(int sectionCount,
     return ctx.currentSectionIndex;
 }
 
+// Compute the updated pre-play start section index when clicking a specific section directly while stopped.
+// Clicking the default first non-count section, a leading count section before it, or the already-selected
+// start section resets back to normal song start (-1).
+inline int computeDirectStartSection(const std::vector<SectionSpan>& spans,
+                                     int currentStartIndex,
+                                     int clickedIndex) {
+    const int n = static_cast<int>(spans.size());
+    if (n == 0 || clickedIndex < 0 || clickedIndex >= n) return -1;
+
+    const int baseIdx = getDefaultStartSectionIndex(spans);
+    if (baseIdx < 0 || clickedIndex <= baseIdx) return -1;
+    if (currentStartIndex == clickedIndex) return -1;
+    return clickedIndex;
+}
+
+// Compute the updated queued section index when clicking a specific section directly while playing.
+// Clicking the already-queued section or the section that will naturally play next cancels any override (-1).
+// Clicking the currently playing section queues a repeat of that section.
+inline int computeDirectQueuedSection(int sectionCount,
+                                      const SectionContext& ctx,
+                                      int currentQueuedIndex,
+                                      int clickedIndex) {
+    if (sectionCount <= 0 || clickedIndex < 0 || clickedIndex >= sectionCount) {
+        return -1;
+    }
+    if (clickedIndex == currentQueuedIndex || clickedIndex == ctx.naturalNextIndex) {
+        return -1;
+    }
+    return clickedIndex;
+}
+
 struct SongTransitionTriggerPlan {
     int64_t endBar = 0;       // Timeline bar where the current song ends
     int64_t triggerBar = 0;   // Timeline bar where transition fires (< endBar for Crossfade 1/2 bar)

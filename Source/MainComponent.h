@@ -4,6 +4,7 @@
 #include "Common/AppTheme.h"
 #include "Database/DatabaseService.h"
 #include "Audio/AudioEngine.h"
+#include "Services/ControlSurfaceService.h"
 #include "UI/Widgets/TransportComponent.h"
 #include "UI/Views/LibraryView.h"
 #include "UI/Views/OpenSetView.h"
@@ -12,7 +13,8 @@
 
 namespace tracks {
 
-class MainComponent : public juce::Component {
+class MainComponent : public juce::Component,
+                      private juce::KeyListener {
 public:
     MainComponent();
     ~MainComponent() override;
@@ -32,6 +34,7 @@ private:
     AppTheme theme_;
     std::unique_ptr<DatabaseService> db_;
     std::unique_ptr<AudioEngine> audioEngine_;
+    std::unique_ptr<ControlSurfaceService> controlSurface_;
 
     // Top Navigation Bar
     juce::Image brandIcon_;
@@ -51,9 +54,15 @@ private:
     // Bottom Transport Bar
     std::unique_ptr<TransportComponent> transport_;
 
+    bool announceSongName_ = true;
+    bool suppressSongAnnouncement_ = true;
+    std::string lastAnnouncedSongKey_;
+
     void switchView(ActiveView view);
     void updateNavButtonStyles();
     void playSong(const Song& song);
+    void executeControlAction(ControlAction action);
+    bool keyPressed(const juce::KeyPress& key, juce::Component* originatingComponent) override;
     void relaunchApp();
 };
 
